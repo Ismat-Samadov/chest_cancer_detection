@@ -2,22 +2,19 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
-import math
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
-from sklearn.utils.class_weight import compute_class_weight
 import tensorflow as tf
-from tensorflow.keras.models import Sequential, Model, load_model
+from tensorflow.keras.models import Sequential, Model
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, BatchNormalization
-from tensorflow.keras.layers import GlobalAveragePooling2D, Input, GaussianNoise, AveragePooling2D
+from tensorflow.keras.layers import GlobalAveragePooling2D, Input, GaussianNoise
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.applications import DenseNet121
 from tensorflow.keras.regularizers import l2
-from tensorflow.keras.utils import Sequence
-from tensorflow.keras.preprocessing.image import img_to_array, load_img
+# Fix for the import error - use scikit-learn instead
+from sklearn.utils.class_weight import compute_class_weight
 from PIL import Image, ImageEnhance, ImageOps
+
 
 # Set random seeds for reproducibility
 np.random.seed(42)
@@ -26,279 +23,178 @@ tf.random.set_seed(42)
 # Define constants
 IMG_SIZE = 224
 BATCH_SIZE = 16
-EPOCHS = 20  # Reduced from 40 to prevent overtraining
-DATA_DIR = "/kaggle/input/chest-ctscan-images/Data"
+EPOCHS = 15
+DATA_DIR = "/kaggle/input/chest-ctscan-images/Data"  # Updated path based on your shared location
 MODEL_PATH = "chest_ct_binary_classifier.keras"
 
 # Create directory to save models and plots
 os.makedirs('models', exist_ok=True)
 os.makedirs('plots', exist_ok=True)
 
-# Define custom preprocessing functions for more advanced augmentation
-def random_clahe(img, chance=0.5):
-    """Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) with random probability"""
-    if np.random.random() < chance:
-        if not isinstance(img, Image.Image):
-            img = Image.fromarray((img * 255).astype(np.uint8))
+# Define custom preprocessing for advanced augmentation
+def custom_preprocessing(img):
+    """Apply advanced preprocessing techniques to a single image"""
+    # Convert to PIL Image if it's a numpy array
+    if not isinstance(img, Image.Image):
+        img = Image.fromarray((img * 255).astype(np.uint8))
+    
+    # Randomly apply CLAHE
+    if np.random.random() < 0.3:
         img = ImageOps.equalize(img)
-        return np.array(img) / 255.0
-    return img
-
-def random_contrast(img, chance=0.5, factor_range=(0.5, 1.5)):
-    """Apply random contrast with given probability"""
-    if np.random.random() < chance:
-        if not isinstance(img, Image.Image):
-            img = Image.fromarray((img * 255).astype(np.uint8))
-        factor = np.random.uniform(*factor_range)
+    
+    # Randomly adjust contrast
+    if np.random.random() < 0.3:
+        factor = np.random.uniform(0.5, 1.5)
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(factor)
-        return np.array(img) / 255.0
-    return img
-
-def random_sharpness(img, chance=0.5, factor_range=(0.5, 2.0)):
-    """Apply random sharpness with given probability"""
-    if np.random.random() < chance:
-        if not isinstance(img, Image.Image):
-            img = Image.fromarray((img * 255).astype(np.uint8))
-        factor = np.random.uniform(*factor_range)
+    
+    # Randomly adjust sharpness
+    if np.random.random() < 0.3:
+        factor = np.random.uniform(0.5, 2.0)
         enhancer = ImageEnhance.Sharpness(img)
         img = enhancer.enhance(factor)
-        return np.array(img) / 255.0
-    return img
+    
+    return np.array(img) / 255.0
 
-# Create a custom preprocessing function that combines all augmentations
-def custom_preprocessing(img):
-    """Apply several preprocessing techniques to a single image"""
-    img = random_clahe(img, chance=0.3)
-    img = random_contrast(img, chance=0.3)
-    img = random_sharpness(img, chance=0.3)
-    return img
-
-# Create a more aggressive data augmentation for training
+# Create data generators
 train_datagen = ImageDataGenerator(
     preprocessing_function=custom_preprocessing,
     rescale=1./255,
     rotation_range=40,
-    width_shift_range=0.3,
-    height_shift_range=0.3,
+    width_shift_range=0.2,
+    height_shift_range=0.2,
     shear_range=0.2,
-    zoom_range=0.3,
+    zoom_range=0.2,
     horizontal_flip=True,
     vertical_flip=True,
     brightness_range=[0.7, 1.3],
     fill_mode='reflect',
-    validation_split=0.1
+    validation_split=0.2
 )
 
-# Only rescale validation and test sets
 test_datagen = ImageDataGenerator(rescale=1./255)
 
-# Define classes for binary classification
+# Define cancer and normal class paths
 cancer_classes = [
     'adenocarcinoma_left.lower.lobe_T2_N0_M0_Ib',
     'large.cell.carcinoma_left.hilum_T2_N2_M0_IIIa',
     'squamous.cell.carcinoma_left.hilum_T1_N2_M0_IIIa'
 ]
-all_classes = ['normal'] + cancer_classes
 
-print("Loading training data...")
-# First, get all the image paths
-train_paths = []
+# Prepare dataframes for the data generators
+train_files = []
 train_labels = []
-for i, class_name in enumerate(all_classes):
-    class_dir = os.path.join(DATA_DIR, 'train', class_name)
-    if os.path.exists(class_dir):
-        files = [os.path.join(class_dir, f) for f in os.listdir(class_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
-        train_paths.extend(files)
-        # 0 for normal, 1 for any cancer type
-        label = 0 if class_name == 'normal' else 1
-        train_labels.extend([label] * len(files))
-
-# Create binary classification training data
-train_df = pd.DataFrame({
-    'filename': train_paths,
-    'class': train_labels
-})
-
-# Verify class distribution
-print(f"Training set class distribution: {train_df['class'].value_counts()}")
-
-# Do the same for validation and test sets
-valid_paths = []
+valid_files = []
 valid_labels = []
-for i, class_name in enumerate(all_classes):
-    class_dir = os.path.join(DATA_DIR, 'valid', class_name)
-    if os.path.exists(class_dir):
-        files = [os.path.join(class_dir, f) for f in os.listdir(class_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
-        valid_paths.extend(files)
-        label = 0 if class_name == 'normal' else 1
-        valid_labels.extend([label] * len(files))
-
-valid_df = pd.DataFrame({
-    'filename': valid_paths,
-    'class': valid_labels
-})
-print(f"Validation set class distribution: {valid_df['class'].value_counts()}")
-
-test_paths = []
+test_files = []
 test_labels = []
-for i, class_name in enumerate(all_classes):
-    class_dir = os.path.join(DATA_DIR, 'test', class_name)
+
+# Add normal class
+for img_file in os.listdir(os.path.join(DATA_DIR, 'train', 'normal')):
+    if img_file.endswith(('.png', '.jpg', '.jpeg')):
+        img_path = os.path.join(DATA_DIR, 'train', 'normal', img_file)
+        train_files.append(img_path)
+        train_labels.append(0)  # 0 for normal
+
+for img_file in os.listdir(os.path.join(DATA_DIR, 'valid', 'normal')):
+    if img_file.endswith(('.png', '.jpg', '.jpeg')):
+        img_path = os.path.join(DATA_DIR, 'valid', 'normal', img_file)
+        valid_files.append(img_path)
+        valid_labels.append(0)  # 0 for normal
+
+for img_file in os.listdir(os.path.join(DATA_DIR, 'test', 'normal')):
+    if img_file.endswith(('.png', '.jpg', '.jpeg')):
+        img_path = os.path.join(DATA_DIR, 'test', 'normal', img_file)
+        test_files.append(img_path)
+        test_labels.append(0)  # 0 for normal
+
+# Add cancer classes (all labeled as 1)
+for cancer_class in cancer_classes:
+    # Training data
+    class_dir = os.path.join(DATA_DIR, 'train', cancer_class)
     if os.path.exists(class_dir):
-        files = [os.path.join(class_dir, f) for f in os.listdir(class_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
-        test_paths.extend(files)
-        label = 0 if class_name == 'normal' else 1
-        test_labels.extend([label] * len(files))
-
-test_df = pd.DataFrame({
-    'filename': test_paths,
-    'class': test_labels
-})
-print(f"Test set class distribution: {test_df['class'].value_counts()}")
-
-# Attempt to fix test dataset issue by combining validation data into test when needed
-# If test set is missing one class, add some samples from validation set
-if 0 not in test_df['class'].values or 1 not in test_df['class'].values:
-    print("WARNING: Test set is missing one or more classes. Adding validation samples to test set.")
+        for img_file in os.listdir(class_dir):
+            if img_file.endswith(('.png', '.jpg', '.jpeg')):
+                img_path = os.path.join(class_dir, img_file)
+                train_files.append(img_path)
+                train_labels.append(1)  # 1 for cancer
     
-    # Determine which class is missing
-    missing_class = 1 if 1 not in test_df['class'].values else 0
-    
-    # Get samples of missing class from validation set
-    missing_samples = valid_df[valid_df['class'] == missing_class]
-    
-    if len(missing_samples) > 0:
-        # Add some validation samples to test set (use 25% of validation samples)
-        num_samples_to_add = max(int(len(missing_samples) * 0.25), 1)
-        samples_to_add = missing_samples.sample(n=num_samples_to_add)
-        
-        # Append to test dataframe
-        test_df = pd.concat([test_df, samples_to_add], ignore_index=True)
-        
-        print(f"Added {num_samples_to_add} samples of class {missing_class} to test set.")
-        print(f"Updated test set class distribution: {test_df['class'].value_counts()}")
-    else:
-        print(f"ERROR: Cannot find samples of class {missing_class} in validation set either.")
+    # Validation data
+    class_dir = os.path.join(DATA_DIR, 'valid', cancer_class)
+    if os.path.exists(class_dir):
+        for img_file in os.listdir(class_dir):
+            if img_file.endswith(('.png', '.jpg', '.jpeg')):
+                img_path = os.path.join(class_dir, img_file)
+                valid_files.append(img_path)
+                valid_labels.append(1)  # 1 for cancer
 
-# Custom data generator for balanced binary classification
-class BalancedBinaryDataGenerator(Sequence):
-    def __init__(self, dataframe, batch_size=16, target_size=(224, 224), 
-                 shuffle=True, seed=None, datagen=None, balanced=True):
-        self.dataframe = dataframe
-        self.batch_size = batch_size
-        self.target_size = target_size
-        self.shuffle = shuffle
-        self.seed = seed
-        self.datagen = datagen if datagen is not None else ImageDataGenerator(rescale=1./255)
-        self.balanced = balanced
-        
-        # Split by class
-        self.normal_indices = dataframe[dataframe['class'] == 0].index.tolist()
-        self.cancer_indices = dataframe[dataframe['class'] == 1].index.tolist()
-        
-        # Check if we have both classes - if not, can't do balanced batches
-        self.has_both_classes = len(self.normal_indices) > 0 and len(self.cancer_indices) > 0
-        
-        if self.balanced and not self.has_both_classes:
-            print(f"WARNING: Can't create balanced batches. Normal samples: {len(self.normal_indices)}, "
-                  f"Cancer samples: {len(self.cancer_indices)}. Switching to unbalanced sampling.")
-            self.balanced = False
-        
-        # Number of batches
-        self.batches_per_epoch = 50 if self.balanced else max(1, len(dataframe) // batch_size)
-        
-        # Reset state for each epoch
-        self.on_epoch_end()
-    
-    def __len__(self):
-        return self.batches_per_epoch
+# For test data - the structure is different with just the cancer type name
+test_cancer_classes = ['adenocarcinoma', 'large.cell.carcinoma', 'squamous.cell.carcinoma']
+for cancer_class in test_cancer_classes:
+    test_class_dir = os.path.join(DATA_DIR, 'test', cancer_class)
+    if os.path.exists(test_class_dir):
+        for img_file in os.listdir(test_class_dir):
+            if img_file.endswith(('.png', '.jpg', '.jpeg')):
+                img_path = os.path.join(test_class_dir, img_file)
+                test_files.append(img_path)
+                test_labels.append(1)  # 1 for cancer
 
-    def __getitem__(self, idx):
-        batch_indices = []
-        
-        if self.balanced and self.has_both_classes:
-            # For each batch, select half normal and half cancer
-            half_batch = self.batch_size // 2
-            
-            # Get indices for this batch
-            batch_normal_indices = np.random.choice(self.normal_indices, size=half_batch, replace=True)
-            batch_cancer_indices = np.random.choice(self.cancer_indices, size=half_batch, replace=True)
-            batch_indices = np.concatenate([batch_normal_indices, batch_cancer_indices])
-            
-            # Shuffle indices
-            if self.shuffle:
-                np.random.shuffle(batch_indices)
-        else:
-            # For unbalanced batches, just select randomly from all indices
-            idx_offset = (idx * self.batch_size) % len(self.dataframe)
-            batch_indices = np.arange(idx_offset, min(idx_offset + self.batch_size, len(self.dataframe)))
-            if self.shuffle:
-                np.random.shuffle(batch_indices)
-        
-        # Load images and labels
-        batch_x = []
-        batch_y = []
-        
-        for i in batch_indices:
-            filename = self.dataframe.iloc[i]['filename']
-            class_label = self.dataframe.iloc[i]['class']
-            
-            # Load image
-            img = Image.open(filename)
-            img = img.resize(self.target_size)
-            img = img.convert('RGB')  # Ensure 3 channels
-            img_array = np.array(img) / 255.0  # Normalize
-            
-            # Apply data augmentation if available
-            if self.datagen is not None:
-                # Convert to batch of 1 for augmentation
-                img_array = np.expand_dims(img_array, axis=0)
-                # Get augmented image - use next() instead of .next()
-                augmented = next(self.datagen.flow(img_array, batch_size=1, shuffle=False))
-                img_array = augmented[0]
-            
-            batch_x.append(img_array)
-            batch_y.append(class_label)
-        
-        return np.array(batch_x), np.array(batch_y)
-    
-    def on_epoch_end(self):
-        """Called at the end of each epoch during training"""
-        if self.shuffle:
-            np.random.shuffle(self.normal_indices)
-            np.random.shuffle(self.cancer_indices)
+# Create dataframes
+train_df = pd.DataFrame({'filename': train_files, 'class': train_labels})
+valid_df = pd.DataFrame({'filename': valid_files, 'class': valid_labels})
+test_df = pd.DataFrame({'filename': test_files, 'class': test_labels})
 
-# Create custom generators
-train_generator = BalancedBinaryDataGenerator(
-    train_df, 
-    batch_size=BATCH_SIZE,
+print(f"Training set: {len(train_df)} images")
+print(f"Validation set: {len(valid_df)} images")
+print(f"Test set: {len(test_df)} images")
+print(f"Training class distribution: {train_df['class'].value_counts()}")
+print(f"Validation class distribution: {valid_df['class'].value_counts()}")
+print(f"Test class distribution: {test_df['class'].value_counts()}")
+
+# Create balanced generators
+class_weights = compute_class_weight('balanced', classes=np.unique(train_df['class']), y=train_df['class'])
+class_weight_dict = {i: class_weights[i] for i in range(len(class_weights))}
+print(f"Class weights: {class_weight_dict}")
+
+# Convert class labels to strings for compatibility with binary class_mode
+train_df['class'] = train_df['class'].astype(str)
+valid_df['class'] = valid_df['class'].astype(str)
+test_df['class'] = test_df['class'].astype(str)
+
+# Flow from dataframe
+train_generator = train_datagen.flow_from_dataframe(
+    dataframe=train_df,
+    x_col="filename",
+    y_col="class",
     target_size=(IMG_SIZE, IMG_SIZE),
-    datagen=train_datagen,
-    balanced=True
+    batch_size=BATCH_SIZE,
+    class_mode="binary",
+    shuffle=True
 )
 
-valid_generator = BalancedBinaryDataGenerator(
-    valid_df,
-    batch_size=BATCH_SIZE,
+valid_generator = test_datagen.flow_from_dataframe(
+    dataframe=valid_df,
+    x_col="filename",
+    y_col="class",
     target_size=(IMG_SIZE, IMG_SIZE),
-    datagen=test_datagen,
-    shuffle=False,
-    balanced=True
+    batch_size=BATCH_SIZE,
+    class_mode="binary",
+    shuffle=False
 )
 
-# For test generator, don't force balancing since we might not have both classes
-test_generator = BalancedBinaryDataGenerator(
-    test_df,
-    batch_size=BATCH_SIZE,
+test_generator = test_datagen.flow_from_dataframe(
+    dataframe=test_df,
+    x_col="filename",
+    y_col="class",
     target_size=(IMG_SIZE, IMG_SIZE),
-    datagen=test_datagen,
-    shuffle=False,
-    balanced=False  # Don't force balancing for test set
+    batch_size=BATCH_SIZE,
+    class_mode="binary",
+    shuffle=False
 )
 
-# Define model using DenseNet121 for binary classification
+# Create binary classification model using DenseNet121
 def create_binary_model():
-    # Load pre-trained DenseNet121 model
+    # Load pre-trained DenseNet121
     base_model = DenseNet121(
         weights='imagenet',
         include_top=False,
@@ -308,31 +204,30 @@ def create_binary_model():
     # Freeze base model initially
     base_model.trainable = False
     
-    # Create new model on top with regularization
+    # Create model architecture
     inputs = Input(shape=(IMG_SIZE, IMG_SIZE, 3))
-    # Add noise for better generalization
-    x = GaussianNoise(0.1)(inputs)
+    x = GaussianNoise(0.1)(inputs)  # Add noise for better generalization
     x = base_model(x, training=False)
     x = GlobalAveragePooling2D()(x)
     
-    # Add more regularization
+    # Add regularization layers
     x = Dense(512, activation='relu', kernel_regularizer=l2(0.001))(x)
     x = BatchNormalization()(x)
-    x = Dropout(0.7)(x)  # Higher dropout
+    x = Dropout(0.5)(x)
     
     x = Dense(256, activation='relu', kernel_regularizer=l2(0.001))(x)
     x = BatchNormalization()(x)
-    x = Dropout(0.7)(x)  # Higher dropout
+    x = Dropout(0.5)(x)
     
-    # Output layer with sigmoid for binary classification
+    # Binary output
     outputs = Dense(1, activation='sigmoid')(x)
     
     model = Model(inputs, outputs)
     
-    # Compile model with binary crossentropy
+    # Compile model
     model.compile(
-        optimizer=Adam(learning_rate=0.0001),  # Lower initial learning rate for stability
-        loss='binary_crossentropy',  # Binary classification loss
+        optimizer=Adam(learning_rate=0.0001),
+        loss='binary_crossentropy',
         metrics=[
             'accuracy',
             tf.keras.metrics.AUC(name='auc'),
@@ -343,22 +238,22 @@ def create_binary_model():
     
     return model, base_model
 
-# Create binary classification model
-print("Creating binary classification model with DenseNet121 architecture...")
+# Create and compile the model
+print("Creating model...")
 model, base_model = create_binary_model()
 model.summary()
 
-# Define callbacks for training with increased patience
+# Define callbacks
 callbacks = [
     EarlyStopping(
         monitor='val_accuracy',
-        patience=7,
+        patience=5,
         restore_best_weights=True,
         verbose=1
     ),
     ReduceLROnPlateau(
         monitor='val_accuracy',
-        factor=0.3,  # Larger reduction factor
+        factor=0.5,
         patience=3,
         min_lr=1e-6,
         verbose=1
@@ -371,29 +266,30 @@ callbacks = [
     )
 ]
 
-# First phase: Train the top layers with frozen base model
+# First phase: Train with frozen base model
 print("Phase 1: Training top layers...")
 history = model.fit(
     train_generator,
-    steps_per_epoch=train_generator.batches_per_epoch,
+    steps_per_epoch=len(train_generator),
     validation_data=valid_generator,
     validation_steps=len(valid_generator),
-    epochs=10,  # Shorter initial training phase
+    epochs=8,
     callbacks=callbacks,
+    class_weight=class_weight_dict,
     verbose=1
 )
 
-# Second phase: Fine-tune the model by unfreezing some layers of the base model
+# Second phase: Fine-tune by unfreezing some layers
 print("Phase 2: Fine-tuning the model...")
 # Unfreeze the top layers of the base model
 base_model.trainable = True
-# Freeze first 100 layers, unfreeze the rest
+# Keep first 100 layers frozen, unfreeze the rest for fine-tuning
 for layer in base_model.layers[:100]:
     layer.trainable = False
 
-# Recompile the model with a lower learning rate
+# Recompile with lower learning rate
 model.compile(
-    optimizer=Adam(learning_rate=0.00001),  # Even lower learning rate for fine-tuning
+    optimizer=Adam(learning_rate=0.00001),
     loss='binary_crossentropy',
     metrics=[
         'accuracy',
@@ -404,210 +300,111 @@ model.compile(
 )
 
 # Continue training
-history_fine_tuning = model.fit(
+fine_tuning_history = model.fit(
     train_generator,
-    steps_per_epoch=train_generator.batches_per_epoch,
+    steps_per_epoch=len(train_generator),
     validation_data=valid_generator,
     validation_steps=len(valid_generator),
     epochs=EPOCHS,
     callbacks=callbacks,
-    verbose=1
+    class_weight=class_weight_dict,
+    verbose=1,
+    initial_epoch=len(history.history['loss'])
 )
 
-# Helper function to safely combine histories
-def combine_histories(hist1, hist2, metric_name):
-    """Safely combine histories even if metric names changed"""
-    # Check for renamed metrics (e.g., 'auc' might become 'auc_1' in fine-tuning)
-    metrics1 = list(hist1.history.keys())
-    metrics2 = list(hist2.history.keys())
-    
-    m1 = metric_name
-    m2 = metric_name
-    
-    # If metric_name not in second history, try with suffix '_1'
-    if metric_name not in metrics2:
-        alt_name = f"{metric_name}_1"
-        if alt_name in metrics2:
-            m2 = alt_name
-        else:
-            # If neither is found, return empty list for second history
-            return hist1.history.get(m1, []) + []
-            
-    return hist1.history.get(m1, []) + hist2.history.get(m2, [])
-
-# Combine the histories safely
-combined_history = {
-    'accuracy': combine_histories(history, history_fine_tuning, 'accuracy'),
-    'val_accuracy': combine_histories(history, history_fine_tuning, 'val_accuracy'),
-    'loss': combine_histories(history, history_fine_tuning, 'loss'),
-    'val_loss': combine_histories(history, history_fine_tuning, 'val_loss'),
-    'auc': combine_histories(history, history_fine_tuning, 'auc'),
-    'val_auc': combine_histories(history, history_fine_tuning, 'val_auc'),
-    'precision': combine_histories(history, history_fine_tuning, 'precision'),
-    'val_precision': combine_histories(history, history_fine_tuning, 'val_precision'),
-    'recall': combine_histories(history, history_fine_tuning, 'recall'),
-    'val_recall': combine_histories(history, history_fine_tuning, 'val_recall')
-}
+# Combine histories for plotting
+history_dict = {}
+for metric in ['accuracy', 'loss', 'auc', 'precision', 'recall', 
+               'val_accuracy', 'val_loss', 'val_auc', 'val_precision', 'val_recall']:
+    if metric in history.history and metric in fine_tuning_history.history:
+        # Handle possible name changes
+        alt_metric = metric
+        if metric not in fine_tuning_history.history and f"{metric}_1" in fine_tuning_history.history:
+            alt_metric = f"{metric}_1"
+        
+        history_dict[metric] = history.history[metric] + fine_tuning_history.history[alt_metric]
 
 # Plot training history
-plt.figure(figsize=(16, 12))
+plt.figure(figsize=(16, 10))
 
 # Plot accuracy
 plt.subplot(2, 2, 1)
-plt.plot(combined_history['accuracy'], label='Training Accuracy')
-plt.plot(combined_history['val_accuracy'], label='Validation Accuracy')
-plt.title('Model Accuracy')
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
+plt.plot(history_dict['accuracy'], label='Train')
+plt.plot(history_dict['val_accuracy'], label='Validation')
+plt.title('Accuracy')
 plt.legend()
 plt.axvline(x=len(history.history['accuracy'])-1, color='r', linestyle='--', label='Fine-tuning start')
 
 # Plot loss
 plt.subplot(2, 2, 2)
-plt.plot(combined_history['loss'], label='Training Loss')
-plt.plot(combined_history['val_loss'], label='Validation Loss')
-plt.title('Model Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
+plt.plot(history_dict['loss'], label='Train')
+plt.plot(history_dict['val_loss'], label='Validation')
+plt.title('Loss')
 plt.legend()
 plt.axvline(x=len(history.history['loss'])-1, color='r', linestyle='--')
 
 # Plot AUC
 plt.subplot(2, 2, 3)
-plt.plot(combined_history['auc'], label='Training AUC')
-plt.plot(combined_history['val_auc'], label='Validation AUC')
-plt.title('Model AUC')
-plt.xlabel('Epoch')
-plt.ylabel('AUC')
+plt.plot(history_dict['auc'], label='Train')
+plt.plot(history_dict['val_auc'], label='Validation')
+plt.title('AUC')
 plt.legend()
 plt.axvline(x=len(history.history['auc'])-1, color='r', linestyle='--')
 
 # Plot Precision-Recall
 plt.subplot(2, 2, 4)
-plt.plot(combined_history['precision'], label='Training Precision')
-plt.plot(combined_history['val_precision'], label='Validation Precision')
-plt.plot(combined_history['recall'], label='Training Recall')
-plt.plot(combined_history['val_recall'], label='Validation Recall')
+plt.plot(history_dict['precision'], label='Train Precision')
+plt.plot(history_dict['val_precision'], label='Validation Precision')
+plt.plot(history_dict['recall'], label='Train Recall')
+plt.plot(history_dict['val_recall'], label='Validation Recall')
 plt.title('Precision and Recall')
-plt.xlabel('Epoch')
-plt.ylabel('Score')
 plt.legend()
 plt.axvline(x=len(history.history['precision'])-1, color='r', linestyle='--')
 
 plt.tight_layout()
-plt.savefig('plots/binary_training_history.png')
-plt.show()
+plt.savefig('plots/training_history.png')
 
-# Handle the test evaluation differently if we're missing a class
-print("\nSaving and preparing model for deployment...")
+# Evaluate the model on test set
+print("Evaluating model on test set...")
+test_results = model.evaluate(test_generator, verbose=1)
+print(f"Test results: {dict(zip(model.metrics_names, test_results))}")
 
-# Save the model
-print(f"Saving binary model to {MODEL_PATH}...")
+# Save the model in different formats
+print(f"Saving model...")
+
+# Save model in Keras format
 model.save(f'models/{MODEL_PATH}')
+print(f"Model saved as models/{MODEL_PATH}")
 
-# Save a smaller TFLite model version for deployment
-print("Converting to TFLite format for deployment...")
+# Save model in TFLite format for mobile/edge deployment
 converter = tf.lite.TFLiteConverter.from_keras_model(model)
 tflite_model = converter.convert()
 with open('models/chest_ct_binary_model.tflite', 'wb') as f:
     f.write(tflite_model)
+print("TFLite model saved as models/chest_ct_binary_model.tflite")
 
-# Create a prediction function for binary classification deployment
-def create_binary_prediction_model():
-    """Create a function for binary classification deployment"""
-    # Binary class names
-    binary_class_names = ['Normal', 'Cancer']
-    
-    def predict_image(image_path=None, image_array=None, threshold=0.5):
-        """
-        Predict whether a CT scan shows cancer or normal tissue
-        
-        Args:
-            image_path: Path to the image file
-            image_array: Preprocessed image array (alternative to image_path)
-            threshold: Classification threshold (default: 0.5)
-            
-        Returns:
-            dict: Prediction results with class name and confidence
-        """
-        if image_path is not None:
-            # Load and preprocess the image
-            img = Image.open(image_path).convert('RGB')
-            img = img.resize((IMG_SIZE, IMG_SIZE))
-            img_array = np.array(img) / 255.0
-            img_array = np.expand_dims(img_array, axis=0)
-        elif image_array is not None:
-            img_array = image_array
-        else:
-            raise ValueError("Either image_path or image_array must be provided")
-        
-        # Make prediction
-        prediction = float(model.predict(img_array)[0][0])
-        predicted_class = int(prediction > threshold)
-        
-        # Create result dictionary
-        result = {
-            "prediction": binary_class_names[predicted_class],
-            "confidence": prediction if predicted_class == 1 else 1 - prediction,
-            "cancer_probability": prediction,
-            "classification_threshold": threshold
-        }
-        
-        return result
-    
-    return predict_image
-
-# Create and save binary prediction model for API deployment
-binary_predict_function = create_binary_prediction_model()
-
-# Example of API usage for binary classification
-"""
-# Example API Usage for Binary Classification
-from flask import Flask, request, jsonify
-import numpy as np
-from PIL import Image
-import io
-import base64
-
-app = Flask(__name__)
-
-# Load the binary prediction function
-binary_predict_function = create_binary_prediction_model()
-
-@app.route('/predict', methods=['POST'])
-def predict():
-    threshold = request.args.get('threshold', default=0.5, type=float)
-    
-    if 'file' not in request.files:
-        # Check if image is sent as base64
-        if 'image' in request.json:
-            base64_img = request.json['image']
-            img_bytes = base64.b64decode(base64_img)
-            img = Image.open(io.BytesIO(img_bytes))
-            img = img.convert('RGB')
-            img = img.resize((IMG_SIZE, IMG_SIZE))
-            img_array = np.array(img) / 255.0
-            img_array = np.expand_dims(img_array, axis=0)
-            
-            result = binary_predict_function(image_array=img_array, threshold=threshold)
-            return jsonify(result)
-        return jsonify({'error': 'No file part or base64 image in request'}), 400
-    
-    file = request.files['file']
-    img = Image.open(file.stream).convert('RGB')
+# Create a simple function to test the model with a single image
+def predict_cancer(image_path):
+    img = Image.open(image_path).convert('RGB')
     img = img.resize((IMG_SIZE, IMG_SIZE))
     img_array = np.array(img) / 255.0
     img_array = np.expand_dims(img_array, axis=0)
     
-    result = binary_predict_function(image_array=img_array, threshold=threshold)
-    return jsonify(result)
+    prediction = model.predict(img_array)[0][0]
+    class_name = "Cancer" if prediction > 0.5 else "Normal"
+    confidence = prediction if prediction > 0.5 else 1 - prediction
+    
+    return {
+        "prediction": class_name,
+        "confidence": float(confidence),
+        "raw_score": float(prediction)
+    }
 
-if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=5000)
-"""
+# Test the model with a sample image
+if len(test_files) > 0:
+    sample_img = test_files[0]
+    result = predict_cancer(sample_img)
+    print(f"Sample prediction for {sample_img}:")
+    print(result)
 
-print("Binary model training and preparation complete.")
-print("The model has been saved in three formats:")
-print(f"1. Full Keras model: models/{MODEL_PATH}")
-print("2. TFLite model: models/chest_ct_binary_model.tflite")
-print("3. Binary prediction function prepared for deployment")
+print("Model training and saving complete.")
