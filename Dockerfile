@@ -12,15 +12,16 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Create models directory
+RUN mkdir -p models
+
+# Copy models - specifically just the main Keras model file that's needed
+COPY models/chest_ct_binary_classifier.keras models/
+
 # Copy application code
 COPY app.py .
 COPY templates/ templates/
 COPY static/ static/
-COPY LICENSE .
-COPY README.md .
-
-# Create directories for models
-RUN mkdir -p models
 
 # Set environment variables
 ENV PORT=8080
