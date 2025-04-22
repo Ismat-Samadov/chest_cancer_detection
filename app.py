@@ -20,14 +20,16 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Create templates directory
+# Create necessary directories
 os.makedirs("templates", exist_ok=True)
+os.makedirs("static", exist_ok=True)  # Create static directory to avoid the error
 
 # Setup templates
 templates = Jinja2Templates(directory="templates")
 
-# Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Mount static files only if the directory exists
+if os.path.exists("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Add CORS middleware to allow cross-origin requests
 app.add_middleware(
@@ -50,8 +52,14 @@ async def startup_event():
     """Load model on startup"""
     global model
     try:
-        model = tf.keras.models.load_model(MODEL_PATH)
-        print(f"Model loaded successfully from {MODEL_PATH}")
+        # Ensure models directory exists
+        os.makedirs("models", exist_ok=True)
+        
+        if os.path.exists(MODEL_PATH):
+            model = tf.keras.models.load_model(MODEL_PATH)
+            print(f"Model loaded successfully from {MODEL_PATH}")
+        else:
+            print(f"Warning: Model file not found at {MODEL_PATH}")
     except Exception as e:
         print(f"Error loading model: {e}")
         model = None
@@ -139,7 +147,8 @@ async def root():
         "model": "DenseNet121-based binary classifier",
         "endpoints": {
             "/predict": "Upload and analyze chest CT scan images",
-            "/ui": "Web interface for image upload and analysis"
+            "/ui": "Web interface for image upload and analysis",
+            "/health": "Health check endpoint"
         }
     }
 
@@ -202,4 +211,6 @@ async def health_check():
 
 # Run the app with uvicorn if executed as a script
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    # Get port from environment variable for Render compatibility
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)

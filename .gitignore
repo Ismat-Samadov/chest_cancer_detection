@@ -1,4 +1,9 @@
 # Byte-compiled / optimized / DLL files
+*.keras
+*.h5
+*.tflite
+models/
+__pycache__/
 __pycache__/
 *.py[cod]
 *$py.class
