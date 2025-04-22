@@ -1,0 +1,183 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chest CT Cancer Detection</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .btn {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .btn:hover {
+            background-color: #45a049;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            display: none;
+        }
+        .normal {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .cancer {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .progress-container {
+            width: 100%;
+            background-color: #ddd;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        .progress-bar {
+            height: 20px;
+            border-radius: 4px;
+            text-align: center;
+            line-height: 20px;
+            color: white;
+            font-weight: bold;
+        }
+        #preview {
+            max-width: 100%;
+            max-height: 300px;
+            margin-top: 10px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Chest CT Cancer Detection</h1>
+        <p>Upload a chest CT scan image to detect potential cancer.</p>
+        
+        <div class="form-group">
+            <label for="ctScan">Upload CT Scan Image:</label>
+            <input type="file" id="ctScan" accept="image/*" onchange="previewImage(this)">
+        </div>
+        
+        <img id="preview" src="#" alt="Image preview">
+        
+        <div class="form-group">
+            <label for="threshold">Classification Threshold (0.0-1.0):</label>
+            <input type="range" id="threshold" min="0" max="1" step="0.05" value="0.5" oninput="updateThresholdValue()">
+            <span id="thresholdValue">0.50</span>
+        </div>
+        
+        <button class="btn" onclick="analyzeImage()">Analyze Image</button>
+        
+        <div id="result">
+            <h3>Results:</h3>
+            <p id="prediction"></p>
+            <p id="confidence"></p>
+            <div class="progress-container">
+                <div id="progressBar" class="progress-bar"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function previewImage(input) {
+            const preview = document.getElementById('preview');
+            if (input.files && input.files[0]) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    preview.src = e.target.result;
+                    preview.style.display = 'block';
+                };
+                reader.readAsDataURL(input.files[0]);
+            }
+        }
+        
+        function updateThresholdValue() {
+            const threshold = document.getElementById('threshold').value;
+            document.getElementById('thresholdValue').textContent = parseFloat(threshold).toFixed(2);
+        }
+        
+        async function analyzeImage() {
+            const fileInput = document.getElementById('ctScan');
+            const threshold = document.getElementById('threshold').value;
+            const resultDiv = document.getElementById('result');
+            const predictionText = document.getElementById('prediction');
+            const confidenceText = document.getElementById('confidence');
+            const progressBar = document.getElementById('progressBar');
+            
+            if (!fileInput.files || fileInput.files.length === 0) {
+                alert('Please select an image to analyze');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            
+            try {
+                const response = await fetch(`/predict?threshold=${threshold}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Error analyzing image');
+                }
+                
+                const result = await response.json();
+                
+                // Display results
+                resultDiv.style.display = 'block';
+                resultDiv.className = result.prediction.toLowerCase() === 'cancer' ? 'cancer' : 'normal';
+                
+                predictionText.textContent = `Prediction: ${result.prediction}`;
+                confidenceText.textContent = `Confidence: ${(result.confidence * 100).toFixed(2)}%`;
+                
+                // Update progress bar
+                const probability = result.cancer_probability * 100;
+                progressBar.style.width = `${probability}%`;
+                progressBar.style.backgroundColor = getColorForProbability(probability);
+                progressBar.textContent = `${probability.toFixed(2)}% Cancer Probability`;
+                
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error analyzing image. Please try again.');
+            }
+        }
+        
+        function getColorForProbability(probability) {
+            // Color gradient from green (0%) to red (100%)
+            if (probability < 20) return '#28a745'; // Green
+            if (probability < 40) return '#5cb85c'; // Light green
+            if (probability < 60) return '#f0ad4e'; // Yellow
+            if (probability < 80) return '#d9534f'; // Orange
+            return '#dc3545'; // Red
+        }
+    </script>
+</body>
+</html>
