@@ -12,10 +12,8 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create models directory
+# Create models directory and copy keras model
 RUN mkdir -p models
-
-# Copy models - specifically just the main Keras model file that's needed
 COPY models/chest_ct_binary_classifier.keras models/
 
 # Copy application code
@@ -26,5 +24,5 @@ COPY static/ static/
 # Set environment variables
 ENV PORT=8080
 
-# Run the application
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+# Run with explicit host and port binding
+CMD uvicorn app:app --host 0.0.0.0 --port 8080
