@@ -1,5 +1,3 @@
-I'll create a detailed README for your chest cancer detection project based on the files you've shared. This README will provide comprehensive information about the project, its purpose, setup instructions, and usage.
-
 # Chest Cancer Detection
 
 A deep learning project for detecting cancer in chest CT scan images using a binary classification approach based on DenseNet121 architecture.
@@ -16,6 +14,19 @@ The dataset contains chest CT scan images organized in the following structure:
 - Training set: Contains images of normal scans and different types of lung cancer (squamous cell carcinoma, adenocarcinoma, and large cell carcinoma)
 - Validation set: Similar structure to training set
 - Test set: Similar structure to training set
+
+## Kaggle Notebook
+
+A complete implementation of this project is available as a Kaggle notebook:
+- **Notebook**: [Chest Cancer Detection](https://www.kaggle.com/code/ismetsemedov/chest-cancer-detection)
+- **Features**: The notebook includes all code for data exploration, model building, training, and evaluation with interactive visualizations
+- **Environment**: Runs in Kaggle's GPU-accelerated environment for faster training
+- **Reproducibility**: Contains all necessary code to reproduce the results
+
+You can:
+- View the notebook on Kaggle
+- Fork it to run your own experiments
+- Download it to run locally
 
 ## Features
 
@@ -148,7 +159,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - Chest CT-Scan Images dataset by Mohamed Hany on Kaggle
 - TensorFlow and Keras teams for developing the deep learning framework
 - DenseNet121 architecture developers
-
-## Contact
-
-For any questions or feedback, please open an issue on GitHub or contact the repository owner.
