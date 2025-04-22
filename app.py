@@ -3,15 +3,22 @@ import os
 import io
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-import tensorflow as tf # type: ignore
+import tensorflow as tf
 from PIL import Image, ImageEnhance, ImageOps
 from pydantic import BaseModel
 from typing import Optional
 import uvicorn
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Chest CT Cancer Detection API",
+    description="API for detecting cancer in chest CT scans using deep learning",
+    version="1.0.0"
+)
 
 # Create templates directory
 os.makedirs("templates", exist_ok=True)
@@ -21,20 +28,6 @@ templates = Jinja2Templates(directory="templates")
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Add a route to serve the HTML page
-@app.get("/ui", response_class=HTMLResponse)
-async def ui(request: Request):
-    """Serve the web UI for image upload and analysis"""
-    return templates.TemplateResponse("index.html", {"request": request})
-
-
-# Initialize FastAPI app
-app = FastAPI(
-    title="Chest CT Cancer Detection API",
-    description="API for detecting cancer in chest CT scans using deep learning",
-    version="1.0.0"
-)
 
 # Add CORS middleware to allow cross-origin requests
 app.add_middleware(
@@ -63,6 +56,11 @@ async def startup_event():
         print(f"Error loading model: {e}")
         model = None
 
+# Add a route to serve the HTML page
+@app.get("/ui", response_class=HTMLResponse)
+async def ui(request: Request):
+    """Serve the web UI for image upload and analysis"""
+    return templates.TemplateResponse("index.html", {"request": request})
 
 # Preprocessing functions (same as in your training script)
 def apply_clahe(img, chance=0.0):  # Set chance to 0 for inference (deterministic)
@@ -140,7 +138,8 @@ async def root():
         "message": "Chest CT Cancer Detection API",
         "model": "DenseNet121-based binary classifier",
         "endpoints": {
-            "/predict": "Upload and analyze chest CT scan images"
+            "/predict": "Upload and analyze chest CT scan images",
+            "/ui": "Web interface for image upload and analysis"
         }
     }
 
