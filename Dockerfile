@@ -20,11 +20,11 @@ COPY app.py .
 COPY templates/ templates/
 COPY models/ models/
 
-# Expose the port that the application listens on
-EXPOSE 8000
+# Expose the port - match with the value in render.yaml
+EXPOSE 10000
 
-# Environment variable for PORT - Render will set this
-ENV PORT=8000
+# Set environment variable
+ENV PORT=10000
 
-# Command to run the API - use the PORT environment variable
-CMD uvicorn app:app --host 0.0.0.0 --port ${PORT}
+# Command to run the API
+CMD uvicorn app:app --host 0.0.0.0 --port 10000

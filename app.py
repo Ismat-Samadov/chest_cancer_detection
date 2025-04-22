@@ -209,8 +209,6 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "ok", "model_loaded": model is not None}
 
-# Run the app with uvicorn if executed as a script
 if __name__ == "__main__":
-    # Get port from environment variable for Render compatibility
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 10000))
     uvicorn.run("app:app", host="0.0.0.0", port=port)

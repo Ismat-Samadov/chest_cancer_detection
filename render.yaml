@@ -1,6 +1,10 @@
 services:
   - type: web
     name: chest-cancer-detection
-    runtime: docker
+    env: docker
     plan: free
+    region: singapore
     healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
