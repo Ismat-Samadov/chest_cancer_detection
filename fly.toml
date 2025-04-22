@@ -1,20 +1,28 @@
-app = "chest-cancer-detection"
-primary_region = "dfw"
+# fly.toml app configuration file generated for chest-cancer-detection on 2025-04-22T23:11:33+04:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'chest-cancer-detection'
+primary_region = 'ams'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
+
+[env]
+  PORT = '8080'
+
+[[mounts]]
+  source = 'chest_detection_data'
+  destination = '/app/models'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = true
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
-  processes = ["app"]
+  processes = ['app']
 
-[mounts]
-  source = "chest_detection_data"
-  destination = "/app/models"
-
-[env]
-  PORT = "8080"
+[[vm]]
+  size = 'performance-8x'
