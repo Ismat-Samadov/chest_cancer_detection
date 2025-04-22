@@ -26,5 +26,5 @@ EXPOSE 8000
 # Environment variable for PORT - Render will set this
 ENV PORT=8000
 
-# Command to run the API
-CMD uvicorn app:app --host 0.0.0.0 --port $PORT
+# Command to run the API - use the PORT environment variable
+CMD uvicorn app:app --host 0.0.0.0 --port ${PORT}
