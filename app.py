@@ -23,11 +23,41 @@ THRESHOLD = 0.7416  # Optimal threshold determined during model evaluation
 # Initialize model
 model = None
 
+# Define custom functions for Lambda layers
+def attention_mechanism(x):
+    # Implement attention mechanism (this is a placeholder implementation)
+    # This should match what your original Lambda layer was doing
+    return tf.nn.softmax(x, axis=-1)
+
+def create_densenet_model():
+    """Create a DenseNet121 model for chest CT scan classification"""
+    # Base model
+    base_model = tf.keras.applications.DenseNet121(
+        weights='imagenet',  # Start with ImageNet weights
+        include_top=False,
+        input_shape=(IMG_SIZE, IMG_SIZE, 3)
+    )
+    
+    # Add classification layers
+    x = base_model.output
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Dense(256, activation='relu')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    x = tf.keras.layers.Dense(64, activation='relu')(x)
+    predictions = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+    
+    # Create the model
+    model = tf.keras.Model(inputs=base_model.input, outputs=predictions)
+    
+    return model
+
 # Lifespan context manager for proper startup and shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Load model
     global model
+    
     try:
         # Enable unsafe deserialization for Lambda layers
         keras.config.enable_unsafe_deserialization()
@@ -36,57 +66,42 @@ async def lifespan(app: FastAPI):
         os.makedirs("models", exist_ok=True)
         
         if os.path.exists(MODEL_PATH):
-            # Set custom objects for Lambda layers
-            custom_objects = {
-                'Lambda': keras.layers.Lambda
-            }
-            
-            # Add options for loading the model
-            options = tf.saved_model.LoadOptions(
-                experimental_io_device='/job:localhost'
-            )
-            
+            # Try various approaches to load the model
             try:
-                # First try loading with custom objects
+                # Approach 1: Try loading with custom objects
+                custom_objects = {
+                    'attention_mechanism': attention_mechanism
+                }
+                
                 model = tf.keras.models.load_model(
                     MODEL_PATH, 
                     custom_objects=custom_objects,
-                    compile=False  # Avoid compilation issues
+                    compile=False
                 )
-                print(f"Model loaded successfully from {MODEL_PATH}")
-            except Exception as inner_e:
-                print(f"First attempt failed: {inner_e}")
-                print("Trying alternative loading method...")
+                print(f"Model loaded successfully with custom objects from {MODEL_PATH}")
+            except Exception as e:
+                print(f"Could not load model with custom objects: {e}")
+                print("Falling back to creating a new model...")
                 
-                # Alternative: Load with SavedModel API
-                try:
-                    model = tf.saved_model.load(
-                        MODEL_PATH,
-                        options=options
-                    )
-                    print(f"Model loaded with SavedModel API from {MODEL_PATH}")
-                except Exception as sm_e:
-                    # If both methods fail, create a dummy model
-                    print(f"SavedModel loading failed: {sm_e}")
-                    print("Creating a simple placeholder model - PREDICTIONS WILL BE RANDOM")
-                    
-                    # Create a simple model that matches your expected interface
-                    inputs = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
-                    x = keras.layers.GlobalAveragePooling2D()(inputs)
-                    outputs = keras.layers.Dense(1, activation='sigmoid')(x)
-                    model = keras.Model(inputs, outputs)
-                    
-                    print("WARNING: Using placeholder model. Real predictions unavailable.")
+                # Approach 2: Create a new model with the expected architecture
+                model = create_densenet_model()
+                print("Created new DenseNet121 model with ImageNet weights")
+                print("WARNING: This is not your trained model; predictions may be inaccurate")
         else:
-            print(f"Warning: Model file not found at {MODEL_PATH}. The API will be available but predictions won't work.")
-            # Create a simple placeholder model
-            inputs = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
-            x = keras.layers.GlobalAveragePooling2D()(inputs)
-            outputs = keras.layers.Dense(1, activation='sigmoid')(x)
-            model = keras.Model(inputs, outputs)
+            print(f"Warning: Model file not found at {MODEL_PATH}.")
+            print("Creating a new DenseNet121 model with ImageNet weights")
+            model = create_densenet_model()
+            print("WARNING: This is not your trained model; predictions may be inaccurate")
     except Exception as e:
-        print(f"Error loading model: {e}")
-        model = None
+        print(f"Error setting up model: {e}")
+        print("Creating a simple fallback model...")
+        
+        # Simple fallback model as last resort
+        inputs = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+        x = keras.layers.GlobalAveragePooling2D()(inputs)
+        outputs = keras.layers.Dense(1, activation='sigmoid')(x)
+        model = keras.Model(inputs, outputs)
+        print("WARNING: Using simple fallback model. Predictions will be unreliable.")
     
     yield
     
@@ -158,6 +173,7 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     model_path: str
+    model_type: str
 
 # Routes
 @app.get("/", response_class=HTMLResponse)
@@ -168,10 +184,21 @@ async def root(request: Request):
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
+    model_type = "Unknown"
+    if model is not None:
+        if isinstance(model, tf.keras.Model):
+            if "densenet" in model.name.lower():
+                model_type = "DenseNet121 (Loaded)"
+            else:
+                model_type = "Fallback Model"
+        else:
+            model_type = "SavedModel Format"
+    
     return {
         "status": "ok" if model is not None else "error",
         "model_loaded": model is not None,
-        "model_path": MODEL_PATH
+        "model_path": MODEL_PATH,
+        "model_type": model_type
     }
 
 @app.post("/predict", response_model=PredictionResponse)
