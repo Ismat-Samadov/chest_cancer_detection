@@ -150,37 +150,33 @@ def custom_preprocessing(img):
 
 def mixup_augmentation(x, y, alpha=0.2):
     """
-    Apply MixUp augmentation with proper type handling
-    
-    Why: MixUp creates new training examples by linearly interpolating between
-    pairs of images and their labels, which helps the model generalize better
-    and reduces overfitting. Especially valuable for medical imaging with small datasets.
+    Apply MixUp augmentation with proper data type handling
     """
-    # Convert inputs to tensors if they're not already
-    x = tf.convert_to_tensor(x)
-    y = tf.convert_to_tensor(y)
+    # Convert inputs to tensors with appropriate types
+    x = tf.convert_to_tensor(x, dtype=tf.float32)
+    y = tf.convert_to_tensor(y, dtype=tf.float32)  # Convert labels to float
     
-    batch_size = x.shape[0]
+    batch_size = tf.shape(x)[0]
     
     # Create indices for shuffling
     indices = tf.random.shuffle(tf.range(batch_size))
     
-    # Sample lambda from beta distribution and ensure it has the right shape
-    random_lambda = np.random.beta(alpha, alpha, batch_size).astype(np.float32)
+    # Sample lambda from beta distribution
+    random_lambda = tf.random.stateless_gamma([batch_size], seed=[42, 0], alpha=alpha) / \
+                    tf.random.stateless_gamma([batch_size], seed=[42, 1], alpha=alpha)
+    random_lambda = tf.minimum(random_lambda, 1.0)
     
-    # Convert to tensor and ensure the right shape for broadcasting with image tensors
-    random_lambda_x = tf.reshape(tf.convert_to_tensor(random_lambda), [batch_size, 1, 1, 1])
+    # Reshape lambda for broadcasting with images
+    random_lambda_x = tf.reshape(random_lambda, [batch_size, 1, 1, 1])
     
     # Apply mixup to images
     shuffled_x = tf.gather(x, indices)
-    mixed_x = random_lambda_x * x + (1 - random_lambda_x) * shuffled_x
-    
-    # Reshape lambda for labels (which are 1D)
-    random_lambda_y = tf.reshape(tf.convert_to_tensor(random_lambda), [batch_size])
+    mixed_x = random_lambda_x * x + (1.0 - random_lambda_x) * shuffled_x
     
     # Apply mixup to labels
+    random_lambda_y = tf.reshape(random_lambda, [batch_size])
     shuffled_y = tf.gather(y, indices)
-    mixed_y = random_lambda_y * y + (1 - random_lambda_y) * shuffled_y
+    mixed_y = random_lambda_y * y + (1.0 - random_lambda_y) * shuffled_y
     
     return mixed_x, mixed_y
 
