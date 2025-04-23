@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 # Constants
 IMG_SIZE = 256  # Same as in training
-MODEL_PATH = "models/chest_ct_binary_classifier_densenet_20250423_054624.keras"
+MODEL_PATH = "models/chest_ct_binary_classifier_densenet_20250423_061443.keras"
 THRESHOLD = 0.7416  # Optimal threshold determined during model evaluation
 
 # Initialize FastAPI app
