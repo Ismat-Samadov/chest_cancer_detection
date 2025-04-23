@@ -42,7 +42,7 @@ app.add_middleware(
 
 # Constants
 IMG_SIZE = 224  # Same as in training
-MODEL_PATH = "models/chest_ct_binary_classifier.keras"  # Path to your saved model
+MODEL_PATH = "models/chest_ct_binary_classifier.keras"
 
 # Initialize model
 model = None
