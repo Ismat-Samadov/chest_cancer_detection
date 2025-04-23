@@ -2,10 +2,12 @@
 import os
 import io
 import numpy as np
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import tensorflow as tf
+import keras
 from PIL import Image
 from pydantic import BaseModel
 from typing import Optional
@@ -18,13 +20,43 @@ IMG_SIZE = 256  # Same as in training
 MODEL_PATH = "models/chest_ct_binary_classifier_densenet_20250423_061443.keras"
 THRESHOLD = 0.7416  # Optimal threshold determined during model evaluation
 
-# Initialize FastAPI app
+# Initialize model
+model = None
+
+# Lifespan context manager for proper startup and shutdown
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Load model
+    global model
+    try:
+        # Enable unsafe deserialization for Lambda layers
+        keras.config.enable_unsafe_deserialization()
+        
+        # Ensure models directory exists
+        os.makedirs("models", exist_ok=True)
+        
+        if os.path.exists(MODEL_PATH):
+            model = tf.keras.models.load_model(MODEL_PATH)
+            print(f"Model loaded successfully from {MODEL_PATH}")
+        else:
+            print(f"Warning: Model file not found at {MODEL_PATH}. The API will be available but predictions won't work.")
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        model = None
+    
+    yield
+    
+    # Shutdown: cleanup (if needed)
+    print("Shutting down application...")
+
+# Initialize FastAPI app with lifespan
 app = FastAPI(
     title="Chest CT Cancer Detection API",
     description="API for detecting cancer in chest CT scans using deep learning",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 # Create necessary directories
@@ -46,26 +78,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Initialize model
-model = None
-
-@app.on_event("startup")
-async def startup_event():
-    """Load model on startup"""
-    global model
-    try:
-        # Ensure models directory exists
-        os.makedirs("models", exist_ok=True)
-        
-        if os.path.exists(MODEL_PATH):
-            model = tf.keras.models.load_model(MODEL_PATH)
-            print(f"Model loaded successfully from {MODEL_PATH}")
-        else:
-            print(f"Warning: Model file not found at {MODEL_PATH}")
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        model = None
 
 def preprocess_image(img):
     """
