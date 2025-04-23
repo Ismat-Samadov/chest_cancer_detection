@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN mkdir -p models
 
 # Copy model and application code
-COPY models/chest_ct_binary_classifier_densenet_20250423_054624.keras models/
+COPY models/chest_ct_binary_classifier_densenet_20250423_061443.keras models/
 COPY app.py .
 COPY templates/ templates/
 COPY static/ static/
