@@ -115,67 +115,98 @@ async def lifespan(app: FastAPI):
     global model
     
     try:
-        # Enable unsafe deserialization for compatibility with complex models
-        keras.config.enable_unsafe_deserialization()
-        
-        # Ensure models directory exists
+        # Create directories if they don't exist
         os.makedirs("models", exist_ok=True)
         
-        if os.path.exists(MODEL_PATH):
-            try:
-                # Try to load the model with custom objects
-                custom_objects = {
-                    'ChannelAttention': ChannelAttention,
-                    'SpatialAttention': SpatialAttention,
-                    'sigmoid_focal_crossentropy': sigmoid_focal_crossentropy
-                }
-                
-                model = tf.keras.models.load_model(
-                    MODEL_PATH, 
-                    custom_objects=custom_objects,
-                    compile=False
-                )
-                print(f"Model loaded successfully from {MODEL_PATH}")
-            except Exception as e:
-                print(f"Could not load model: {e}")
-                print("Creating DenseNet121 model with ImageNet weights")
-                # Create a simple model as fallback
-                base_model = tf.keras.applications.DenseNet121(
-                    weights='imagenet',
-                    include_top=False,
-                    input_shape=(IMG_SIZE, IMG_SIZE, 3)
-                )
-                
-                x = base_model.output
-                x = tf.keras.layers.GlobalAveragePooling2D()(x)
-                x = tf.keras.layers.Dense(256, activation='relu')(x)
-                x = tf.keras.layers.BatchNormalization()(x)
-                x = tf.keras.layers.Dropout(0.5)(x)
-                x = tf.keras.layers.Dense(64, activation='relu')(x)
-                predictions = tf.keras.layers.Dense(1, activation='sigmoid')(x)
-                
-                model = tf.keras.Model(inputs=base_model.input, outputs=predictions)
-                print("WARNING: Using untrained model with ImageNet weights. Predictions will be unreliable.")
-        else:
-            print(f"Warning: Model file not found at {MODEL_PATH}.")
-            print("Creating DenseNet121 model with ImageNet weights")
-            # Create a simple model as fallback
+        # Create DenseNet model with attention
+        def create_densenet_model_with_attention():
+            """Create an enhanced DenseNet121-based model with attention"""
             base_model = tf.keras.applications.DenseNet121(
                 weights='imagenet',
                 include_top=False,
                 input_shape=(IMG_SIZE, IMG_SIZE, 3)
             )
             
-            x = base_model.output
+            inputs = tf.keras.layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+            
+            # Gaussian noise for robustness
+            x = tf.keras.layers.GaussianNoise(0.1)(inputs)
+            x = base_model(x, training=False)
+            
+            # Apply attention
+            x = ChannelAttention(ratio=8)(x)
+            x = SpatialAttention(kernel_size=7)(x)
+            
             x = tf.keras.layers.GlobalAveragePooling2D()(x)
-            x = tf.keras.layers.Dense(256, activation='relu')(x)
+            
+            # Dense layers with regularization
+            x = tf.keras.layers.Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0015))(x)
             x = tf.keras.layers.BatchNormalization()(x)
             x = tf.keras.layers.Dropout(0.5)(x)
-            x = tf.keras.layers.Dense(64, activation='relu')(x)
-            predictions = tf.keras.layers.Dense(1, activation='sigmoid')(x)
             
-            model = tf.keras.Model(inputs=base_model.input, outputs=predictions)
-            print("WARNING: Using untrained model with ImageNet weights. Predictions will be unreliable.")
+            x = tf.keras.layers.Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0015))(x)
+            x = tf.keras.layers.BatchNormalization()(x)
+            x = tf.keras.layers.Dropout(0.5)(x)
+            
+            # Output layer
+            outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+            
+            model = tf.keras.Model(inputs, outputs)
+            
+            return model
+        
+        # Create the model with attention
+        print("Creating model with attention architecture...")
+        model = create_densenet_model_with_attention()
+        
+        # Try to load weights if the model file exists
+        if os.path.exists(MODEL_PATH):
+            try:
+                print(f"Loading weights from {MODEL_PATH}...")
+                
+                # Register custom objects
+                custom_objects = {
+                    'ChannelAttention': ChannelAttention,
+                    'SpatialAttention': SpatialAttention,
+                    'sigmoid_focal_crossentropy': sigmoid_focal_crossentropy
+                }
+                
+                # Enable unsafe deserialization
+                keras.config.enable_unsafe_deserialization()
+                
+                # Try to load the model directly
+                try:
+                    temp_model = tf.keras.models.load_model(
+                        MODEL_PATH,
+                        custom_objects=custom_objects,
+                        compile=False,
+                        safe_mode=False
+                    )
+                    
+                    # If successful, use the loaded model
+                    model = temp_model
+                    print("Successfully loaded model!")
+                except Exception as e:
+                    print(f"Could not load model directly: {e}")
+                    
+                    # Try to load weights from h5 file instead
+                    h5_path = MODEL_PATH.replace(".keras", ".h5")
+                    if os.path.exists(h5_path):
+                        try:
+                            print(f"Trying to load weights from {h5_path}...")
+                            model.load_weights(h5_path)
+                            print("Successfully loaded weights from h5 file!")
+                        except Exception as e2:
+                            print(f"Could not load weights from h5 file: {e2}")
+                            print("Using model with ImageNet weights - predictions will be unreliable")
+                    else:
+                        print("No h5 file found, using model with ImageNet weights - predictions will be unreliable")
+            except Exception as e:
+                print(f"Error during model loading: {e}")
+                print("Using model with ImageNet weights - predictions will be unreliable")
+        else:
+            print(f"Model file not found at {MODEL_PATH}")
+            print("Using model with ImageNet weights - predictions will be unreliable")
     except Exception as e:
         print(f"Error setting up model: {e}")
         print("Creating a simple fallback model...")
@@ -271,20 +302,21 @@ async def health_check():
     model_type = "Unknown"
     if model is not None:
         if isinstance(model, tf.keras.Model):
-            # Get model architecture information
+            # Check for attention layers
+            has_attention = False
             for layer in model.layers:
-                if isinstance(layer, tf.keras.applications.densenet.DenseNet121):
-                    model_type = "DenseNet121 with Custom Layers"
+                if isinstance(layer, ChannelAttention) or isinstance(layer, SpatialAttention):
+                    has_attention = True
                     break
-            if model_type == "Unknown" and hasattr(model, 'name'):
-                if "densenet" in model.name.lower():
-                    model_type = "DenseNet Model"
-                elif "resnet" in model.name.lower():
-                    model_type = "ResNet Model"
-                else:
-                    model_type = "Custom Model"
+            
+            if has_attention:
+                model_type = "DenseNet121 with Attention"
+            elif any("densenet" in str(layer.__class__).lower() for layer in model.layers):
+                model_type = "DenseNet121 (Base)"
+            else:
+                model_type = "Custom Model"
         else:
-            model_type = "SavedModel Format"
+            model_type = "Unknown Model Format"
     
     return {
         "status": "ok" if model is not None else "error",
