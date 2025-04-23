@@ -17,40 +17,96 @@ from fastapi.staticfiles import StaticFiles
 
 # Constants
 IMG_SIZE = 256  # Same as in training
-MODEL_PATH = "models/chest_ct_binary_classifier_densenet_20250423_061443.keras"
+MODEL_PATH = "models/chest_ct_binary_classifier_densenet_20250423_104845.keras"
 THRESHOLD = 0.7416  # Optimal threshold determined during model evaluation
 
 # Initialize model
 model = None
 
-# Define custom functions for Lambda layers
-def attention_mechanism(x):
-    # Implement attention mechanism (this is a placeholder implementation)
-    # This should match what your original Lambda layer was doing
-    return tf.nn.softmax(x, axis=-1)
+# Custom layer classes to match the trainer.py
+class ChannelAttention(tf.keras.layers.Layer):
+    def __init__(self, ratio=8, **kwargs):
+        super(ChannelAttention, self).__init__(**kwargs)
+        self.ratio = ratio
+        
+    def build(self, input_shape):
+        channel = input_shape[-1]
+        self.gap = tf.keras.layers.GlobalAveragePooling2D()
+        self.dense1 = tf.keras.layers.Dense(channel // self.ratio, activation='relu', 
+                          kernel_initializer='he_normal', use_bias=False)
+        self.dense2 = tf.keras.layers.Dense(channel, activation='sigmoid', 
+                          kernel_initializer='he_normal', use_bias=False)
+        self.reshape = tf.keras.layers.Reshape((1, 1, channel))
+        self.multiply = tf.keras.layers.Multiply()
+        
+        super(ChannelAttention, self).build(input_shape)
+        
+    def call(self, inputs):
+        gap = self.gap(inputs)
+        dense1 = self.dense1(gap)
+        dense2 = self.dense2(dense1)
+        reshape = self.reshape(dense2)
+        
+        return self.multiply([inputs, reshape])
+    
+    def compute_output_shape(self, input_shape):
+        return input_shape
+    
+    def get_config(self):
+        config = super(ChannelAttention, self).get_config()
+        config.update({
+            'ratio': self.ratio
+        })
+        return config
 
-def create_densenet_model():
-    """Create a DenseNet121 model for chest CT scan classification"""
-    # Base model
-    base_model = tf.keras.applications.DenseNet121(
-        weights='imagenet',  # Start with ImageNet weights
-        include_top=False,
-        input_shape=(IMG_SIZE, IMG_SIZE, 3)
-    )
+class SpatialAttention(tf.keras.layers.Layer):
+    def __init__(self, kernel_size=7, **kwargs):
+        super(SpatialAttention, self).__init__(**kwargs)
+        self.kernel_size = kernel_size
+        
+    def build(self, input_shape):
+        self.conv = tf.keras.layers.Conv2D(1, kernel_size=self.kernel_size, padding='same', activation='sigmoid')
+        self.multiply = tf.keras.layers.Multiply()
+        super(SpatialAttention, self).build(input_shape)
+        
+    def call(self, inputs):
+        # Max pool along channel dimension
+        max_pool = tf.reduce_max(inputs, axis=3, keepdims=True)
+        # Average pool along channel dimension
+        avg_pool = tf.reduce_mean(inputs, axis=3, keepdims=True)
+        # Concatenate
+        concat = tf.concat([max_pool, avg_pool], axis=3)
+        # Apply convolution
+        attention_map = self.conv(concat)
+        # Apply attention
+        return self.multiply([inputs, attention_map])
     
-    # Add classification layers
-    x = base_model.output
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
-    x = tf.keras.layers.Dense(256, activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dropout(0.5)(x)
-    x = tf.keras.layers.Dense(64, activation='relu')(x)
-    predictions = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+    def compute_output_shape(self, input_shape):
+        return input_shape
     
-    # Create the model
-    model = tf.keras.Model(inputs=base_model.input, outputs=predictions)
+    def get_config(self):
+        config = super(SpatialAttention, self).get_config()
+        config.update({
+            'kernel_size': self.kernel_size
+        })
+        return config
+
+# Custom focal loss function
+def sigmoid_focal_crossentropy(y_true, y_pred, alpha=0.25, gamma=2.0):
+    """Custom implementation of Focal Loss"""
+    # Get binary crossentropy
+    bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
     
-    return model
+    # Convert y_true to float32 if needed
+    y_true = tf.cast(y_true, dtype=tf.float32)
+    
+    # Calculate the modulating factor
+    p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
+    alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
+    modulating_factor = tf.pow((1.0 - p_t), gamma)
+    
+    # Apply the factors and return
+    return alpha_factor * modulating_factor * bce
 
 # Lifespan context manager for proper startup and shutdown
 @asynccontextmanager
@@ -59,18 +115,19 @@ async def lifespan(app: FastAPI):
     global model
     
     try:
-        # Enable unsafe deserialization for Lambda layers
+        # Enable unsafe deserialization for compatibility with complex models
         keras.config.enable_unsafe_deserialization()
         
         # Ensure models directory exists
         os.makedirs("models", exist_ok=True)
         
         if os.path.exists(MODEL_PATH):
-            # Try various approaches to load the model
             try:
-                # Approach 1: Try loading with custom objects
+                # Try to load the model with custom objects
                 custom_objects = {
-                    'attention_mechanism': attention_mechanism
+                    'ChannelAttention': ChannelAttention,
+                    'SpatialAttention': SpatialAttention,
+                    'sigmoid_focal_crossentropy': sigmoid_focal_crossentropy
                 }
                 
                 model = tf.keras.models.load_model(
@@ -78,29 +135,56 @@ async def lifespan(app: FastAPI):
                     custom_objects=custom_objects,
                     compile=False
                 )
-                print(f"Model loaded successfully with custom objects from {MODEL_PATH}")
+                print(f"Model loaded successfully from {MODEL_PATH}")
             except Exception as e:
-                print(f"Could not load model with custom objects: {e}")
-                print("Falling back to creating a new model...")
+                print(f"Could not load model: {e}")
+                print("Creating DenseNet121 model with ImageNet weights")
+                # Create a simple model as fallback
+                base_model = tf.keras.applications.DenseNet121(
+                    weights='imagenet',
+                    include_top=False,
+                    input_shape=(IMG_SIZE, IMG_SIZE, 3)
+                )
                 
-                # Approach 2: Create a new model with the expected architecture
-                model = create_densenet_model()
-                print("Created new DenseNet121 model with ImageNet weights")
-                print("WARNING: This is not your trained model; predictions may be inaccurate")
+                x = base_model.output
+                x = tf.keras.layers.GlobalAveragePooling2D()(x)
+                x = tf.keras.layers.Dense(256, activation='relu')(x)
+                x = tf.keras.layers.BatchNormalization()(x)
+                x = tf.keras.layers.Dropout(0.5)(x)
+                x = tf.keras.layers.Dense(64, activation='relu')(x)
+                predictions = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+                
+                model = tf.keras.Model(inputs=base_model.input, outputs=predictions)
+                print("WARNING: Using untrained model with ImageNet weights. Predictions will be unreliable.")
         else:
             print(f"Warning: Model file not found at {MODEL_PATH}.")
-            print("Creating a new DenseNet121 model with ImageNet weights")
-            model = create_densenet_model()
-            print("WARNING: This is not your trained model; predictions may be inaccurate")
+            print("Creating DenseNet121 model with ImageNet weights")
+            # Create a simple model as fallback
+            base_model = tf.keras.applications.DenseNet121(
+                weights='imagenet',
+                include_top=False,
+                input_shape=(IMG_SIZE, IMG_SIZE, 3)
+            )
+            
+            x = base_model.output
+            x = tf.keras.layers.GlobalAveragePooling2D()(x)
+            x = tf.keras.layers.Dense(256, activation='relu')(x)
+            x = tf.keras.layers.BatchNormalization()(x)
+            x = tf.keras.layers.Dropout(0.5)(x)
+            x = tf.keras.layers.Dense(64, activation='relu')(x)
+            predictions = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+            
+            model = tf.keras.Model(inputs=base_model.input, outputs=predictions)
+            print("WARNING: Using untrained model with ImageNet weights. Predictions will be unreliable.")
     except Exception as e:
         print(f"Error setting up model: {e}")
         print("Creating a simple fallback model...")
         
         # Simple fallback model as last resort
-        inputs = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
-        x = keras.layers.GlobalAveragePooling2D()(inputs)
-        outputs = keras.layers.Dense(1, activation='sigmoid')(x)
-        model = keras.Model(inputs, outputs)
+        inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+        x = tf.keras.layers.GlobalAveragePooling2D()(inputs)
+        outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+        model = tf.keras.Model(inputs, outputs)
         print("WARNING: Using simple fallback model. Predictions will be unreliable.")
     
     yield
@@ -187,10 +271,18 @@ async def health_check():
     model_type = "Unknown"
     if model is not None:
         if isinstance(model, tf.keras.Model):
-            if "densenet" in model.name.lower():
-                model_type = "DenseNet121 (Loaded)"
-            else:
-                model_type = "Fallback Model"
+            # Get model architecture information
+            for layer in model.layers:
+                if isinstance(layer, tf.keras.applications.densenet.DenseNet121):
+                    model_type = "DenseNet121 with Custom Layers"
+                    break
+            if model_type == "Unknown" and hasattr(model, 'name'):
+                if "densenet" in model.name.lower():
+                    model_type = "DenseNet Model"
+                elif "resnet" in model.name.lower():
+                    model_type = "ResNet Model"
+                else:
+                    model_type = "Custom Model"
         else:
             model_type = "SavedModel Format"
     
@@ -233,8 +325,8 @@ async def predict(file: UploadFile = File(...), threshold: Optional[float] = THR
         # Preprocess image
         img_array = preprocess_image(img)
         
-        # Make prediction
-        prediction = float(model.predict(img_array)[0][0])
+        # Make prediction with reduced verbosity
+        prediction = float(model.predict(img_array, verbose=0)[0][0])
         predicted_class = int(prediction > threshold)
         
         # Class names

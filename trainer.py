@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Input, Dropout, BatchNormalization, Concatenate
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, AveragePooling2D, Flatten, Add, Multiply
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, AveragePooling2D, Flatten, Add, Multiply, Reshape
 from tensorflow.keras.applications import DenseNet121, ResNet50, EfficientNetB0
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
@@ -21,6 +21,7 @@ from PIL import Image, ImageEnhance, ImageOps
 from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
 from sklearn.model_selection import KFold
 import seaborn as sns
+import datetime
 
 # Custom implementation of Focal Loss to replace TensorFlow Addons
 def sigmoid_focal_crossentropy(y_true, y_pred, alpha=0.25, gamma=2.0):
@@ -285,56 +286,77 @@ class EnhancedBalancedGenerator(tf.keras.utils.Sequence):
             np.random.shuffle(self.cancer_indices)
 
 # -------------------------------------------------------
-# Attention Mechanisms
+# Attention Mechanisms (Using Custom Layers Instead of Lambda)
 # -------------------------------------------------------
 
-def create_attention_module(x, ratio=8):
-    """
-    Create a channel attention module (Squeeze-and-Excitation block)
+# Custom Channel Attention Layer
+class ChannelAttention(tf.keras.layers.Layer):
+    def __init__(self, ratio=8, **kwargs):
+        super(ChannelAttention, self).__init__(**kwargs)
+        self.ratio = ratio
+        
+    def build(self, input_shape):
+        channel = input_shape[-1]
+        self.gap = GlobalAveragePooling2D()
+        self.dense1 = Dense(channel // self.ratio, activation='relu', 
+                          kernel_initializer='he_normal', use_bias=False)
+        self.dense2 = Dense(channel, activation='sigmoid', 
+                          kernel_initializer='he_normal', use_bias=False)
+        self.reshape = Reshape((1, 1, channel))
+        self.multiply = Multiply()
+        
+        super(ChannelAttention, self).build(input_shape)
+        
+    def call(self, inputs):
+        gap = self.gap(inputs)
+        dense1 = self.dense1(gap)
+        dense2 = self.dense2(dense1)
+        reshape = self.reshape(dense2)
+        
+        return self.multiply([inputs, reshape])
     
-    Why: Attention mechanisms help the model focus on relevant areas of the image
-    and ignore irrelevant parts, which is particularly important for detecting
-    subtle cancer features in CT scans.
-    """
-    channel = tf.keras.backend.int_shape(x)[-1]
+    def compute_output_shape(self, input_shape):
+        return input_shape
     
-    # Squeeze operation
-    se = GlobalAveragePooling2D()(x)
-    
-    # Excitation operation
-    se = Dense(channel // ratio, activation='relu', kernel_initializer='he_normal', use_bias=False)(se)
-    se = Dense(channel, activation='sigmoid', kernel_initializer='he_normal', use_bias=False)(se)
-    
-    # Scale the input - using Keras Reshape layer instead of tf.reshape
-    se = tf.keras.layers.Reshape((1, 1, channel))(se)
-    x = Multiply()([x, se])
-    
-    return x
+    def get_config(self):
+        config = super(ChannelAttention, self).get_config()
+        config.update({
+            'ratio': self.ratio
+        })
+        return config
 
-def create_spatial_attention_module(x):
-    """
-    Create a spatial attention module
+# Custom Spatial Attention Layer
+class SpatialAttention(tf.keras.layers.Layer):
+    def __init__(self, kernel_size=7, **kwargs):
+        super(SpatialAttention, self).__init__(**kwargs)
+        self.kernel_size = kernel_size
+        
+    def build(self, input_shape):
+        self.conv = Conv2D(1, kernel_size=self.kernel_size, padding='same', activation='sigmoid')
+        self.multiply = Multiply()
+        super(SpatialAttention, self).build(input_shape)
+        
+    def call(self, inputs):
+        # Max pool along channel dimension
+        max_pool = tf.reduce_max(inputs, axis=3, keepdims=True)
+        # Average pool along channel dimension
+        avg_pool = tf.reduce_mean(inputs, axis=3, keepdims=True)
+        # Concatenate
+        concat = tf.concat([max_pool, avg_pool], axis=3)
+        # Apply convolution
+        attention_map = self.conv(concat)
+        # Apply attention
+        return self.multiply([inputs, attention_map])
     
-    Why: Spatial attention helps the model focus on specific regions
-    in the image that are most likely to contain cancer indicators.
-    """
-    # Generate max pooled features using Keras layers
-    max_pool = tf.keras.layers.Lambda(lambda x: tf.reduce_max(x, axis=3, keepdims=True))(x)
+    def compute_output_shape(self, input_shape):
+        return input_shape
     
-    # Generate average pooled features using Keras layers
-    avg_pool = tf.keras.layers.Lambda(lambda x: tf.reduce_mean(x, axis=3, keepdims=True))(x)
-    
-    # Concatenate pool features
-    concat = tf.keras.layers.Concatenate(axis=3)([max_pool, avg_pool])
-    
-    # Conv to generate attention map
-    attention = Conv2D(1, kernel_size=7, padding='same', activation='sigmoid')(concat)
-    
-    # Apply attention
-    x = Multiply()([x, attention])
-    
-    return x
-
+    def get_config(self):
+        config = super(SpatialAttention, self).get_config()
+        config.update({
+            'kernel_size': self.kernel_size
+        })
+        return config
 
 # -------------------------------------------------------
 # Enhanced Model Architectures
@@ -357,10 +379,10 @@ def create_densenet_model(use_attention=False):
     x = tf.keras.layers.GaussianNoise(0.1)(inputs)
     x = base_model(x, training=False)
     
-    # Apply attention if enabled
+    # Apply attention if enabled - using custom layers instead of Lambda
     if use_attention:
-        x = create_attention_module(x)
-        x = create_spatial_attention_module(x)
+        x = ChannelAttention(ratio=8)(x)
+        x = SpatialAttention(kernel_size=7)(x)
     
     x = GlobalAveragePooling2D()(x)
     
@@ -409,10 +431,10 @@ def create_resnet_model(use_attention=False):
     x = tf.keras.layers.GaussianNoise(0.1)(inputs)
     x = base_model(x, training=False)
     
-    # Apply attention if enabled
+    # Apply attention if enabled - using custom layers instead of Lambda
     if use_attention:
-        x = create_attention_module(x)
-        x = create_spatial_attention_module(x)
+        x = ChannelAttention(ratio=8)(x)
+        x = SpatialAttention(kernel_size=7)(x)
     
     x = GlobalAveragePooling2D()(x)
     
@@ -461,10 +483,10 @@ def create_efficientnet_model(use_attention=False):
     x = tf.keras.layers.GaussianNoise(0.1)(inputs)
     x = base_model(x, training=False)
     
-    # Apply attention if enabled
+    # Apply attention if enabled - using custom layers instead of Lambda
     if use_attention:
-        x = create_attention_module(x)
-        x = create_spatial_attention_module(x)
+        x = ChannelAttention(ratio=8)(x)
+        x = SpatialAttention(kernel_size=7)(x)
     
     x = GlobalAveragePooling2D()(x)
     
@@ -1010,20 +1032,18 @@ def predict_cancer_with_explanation(model, image_path, threshold=0.5):
    try:
        # Get the last convolutional layer
        if MODEL_ARCHITECTURE == "densenet":
-           last_conv_layer_name = [layer.name for layer in model.layers if 'conv5_block16_concat' in layer.name][0]
+           last_conv_layer = model.get_layer("conv5_block16_concat")
        elif MODEL_ARCHITECTURE == "resnet":
-           last_conv_layer_name = [layer.name for layer in model.layers if 'conv5_block3_out' in layer.name][0]
+           last_conv_layer = model.get_layer("conv5_block3_out")
        elif MODEL_ARCHITECTURE == "efficientnet":
-           last_conv_layer_name = [layer.name for layer in model.layers if 'top_activation' in layer.name][0]
+           last_conv_layer = model.get_layer("top_activation")
        else:
            # Fallback - find the last conv layer
-           conv_layers = [layer.name for layer in model.layers if 'conv' in layer.name.lower() and len(layer.output_shape) == 4]
-           last_conv_layer_name = conv_layers[-1] if conv_layers else None
+           conv_layers = [layer for layer in model.layers if 'conv' in layer.name.lower() and len(layer.output_shape) == 4]
+           last_conv_layer = conv_layers[-1] if conv_layers else None
        
-       if last_conv_layer_name:
-           last_conv_layer = model.get_layer(last_conv_layer_name)
-           
-           # Create a model that maps the input image to the activations of the last conv layer
+       if last_conv_layer:
+           # Create a model that maps the input image to the activations of the last conv layer and predictions
            grad_model = tf.keras.models.Model(
                [model.inputs], 
                [last_conv_layer.output, model.output]
@@ -1091,7 +1111,6 @@ def predict_cancer_with_explanation(model, image_path, threshold=0.5):
 # -------------------------------------------------------
 
 # Create timestamp for version tracking
-import datetime
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # Save the model in Keras format
