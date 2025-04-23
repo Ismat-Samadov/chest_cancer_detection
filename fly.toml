@@ -1,8 +1,4 @@
-# fly.toml app configuration file generated for chest-cancer-detection on 2025-04-22T23:11:33+04:00
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
-
+# fly.toml app configuration file
 app = 'chest-cancer-detection'
 primary_region = 'ams'
 
@@ -25,4 +21,4 @@ primary_region = 'ams'
   processes = ['app']
 
 [[vm]]
-  size = 'performance-8x'
+  size = 'shared-cpu-1x'  # Use smaller instance type for API
