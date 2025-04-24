@@ -3,7 +3,7 @@ import os
 import io
 import numpy as np
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import tensorflow as tf
@@ -17,22 +17,17 @@ from fastapi.staticfiles import StaticFiles
 
 # Constants
 IMG_SIZE = 256  # Same as in training
-MODEL_PATH = "models/chest_ct_binary_classifier_densenet_20250423_104845.keras"
+MODEL_PATH = "models/chest_ct_binary_classifier_densenet_20250423_082821.keras"
 THRESHOLD = 0.7416  # Optimal threshold determined during model evaluation
 
 # Initialize model
 model = None
 
-# Custom layer classes to match the trainer.py
+# Custom layer classes for loading the model
 class ChannelAttention(tf.keras.layers.Layer):
     def __init__(self, ratio=8, **kwargs):
         super(ChannelAttention, self).__init__(**kwargs)
         self.ratio = ratio
-        self.gap = None
-        self.dense1 = None
-        self.dense2 = None
-        self.reshape = None
-        self.multiply = None
         
     def build(self, input_shape):
         channel = input_shape[-1]
@@ -68,8 +63,6 @@ class SpatialAttention(tf.keras.layers.Layer):
     def __init__(self, kernel_size=7, **kwargs):
         super(SpatialAttention, self).__init__(**kwargs)
         self.kernel_size = kernel_size
-        self.conv = None
-        self.multiply = None
         
     def build(self, input_shape):
         self.conv = tf.keras.layers.Conv2D(1, kernel_size=self.kernel_size, padding='same', activation='sigmoid')
@@ -125,13 +118,25 @@ async def lifespan(app: FastAPI):
         # Create directories if they don't exist
         os.makedirs("models", exist_ok=True)
         
-        print("Looking for model file...")
-        model_exists = os.path.exists(MODEL_PATH)
-        h5_path = MODEL_PATH.replace(".keras", ".h5")
-        h5_exists = os.path.exists(h5_path)
+        print("Looking for model files...")
         
-        print(f"Model path exists: {model_exists}")
-        print(f"H5 path exists: {h5_exists}")
+        # Define paths to check
+        keras_path = MODEL_PATH
+        h5_path = MODEL_PATH.replace(".keras", ".h5")
+        tf_saved_model_path = MODEL_PATH.replace(".keras", "_tf")
+        checkpoint_path = "models/binary_model_densenet_checkpoint.keras"
+        
+        # Check if files exist
+        keras_exists = os.path.exists(keras_path)
+        h5_exists = os.path.exists(h5_path)
+        # Properly check for SavedModel (directory with saved_model.pb inside)
+        tf_saved_model_exists = os.path.isdir(tf_saved_model_path) and os.path.exists(os.path.join(tf_saved_model_path, "saved_model.pb"))
+        checkpoint_exists = os.path.exists(checkpoint_path)
+        
+        print(f"Keras model exists: {keras_exists}")
+        print(f"H5 model exists: {h5_exists}")
+        print(f"TF SavedModel exists: {tf_saved_model_exists}")
+        print(f"Checkpoint model exists: {checkpoint_exists}")
         
         # Define custom objects for model loading
         custom_objects = {
@@ -141,47 +146,111 @@ async def lifespan(app: FastAPI):
         }
         
         # Enable unsafe deserialization for custom layers
+        # This is needed for TensorFlow 2.16+ to load custom layers
         keras.config.enable_unsafe_deserialization()
         
-        # Create a model identical to the one used in training
-        def create_densenet_model_with_attention():
-            """Create an enhanced DenseNet121-based model with attention - matching training exactly"""
-            base_model = tf.keras.applications.DenseNet121(
-                weights='imagenet',
-                include_top=False,
-                input_shape=(IMG_SIZE, IMG_SIZE, 3)
-            )
-            
-            # Freeze base model
-            base_model.trainable = False
-            
-            inputs = tf.keras.layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
-            
-            # Gaussian noise for robustness
-            x = tf.keras.layers.GaussianNoise(0.1)(inputs)
-            x = base_model(x, training=False)
-            
-            # Apply attention
-            x = ChannelAttention(ratio=8)(x)
-            x = SpatialAttention(kernel_size=7)(x)
-            
-            x = tf.keras.layers.GlobalAveragePooling2D()(x)
-            
-            # Dense layers with regularization - match exactly with trainer.py
-            x = tf.keras.layers.Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0015))(x)
-            x = tf.keras.layers.BatchNormalization()(x)
-            x = tf.keras.layers.Dropout(0.5)(x)
-            
-            x = tf.keras.layers.Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0015))(x)
-            x = tf.keras.layers.BatchNormalization()(x)
-            x = tf.keras.layers.Dropout(0.5)(x)
-            
-            # Output layer
-            outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
-            
-            model = tf.keras.Model(inputs, outputs)
-            
-            # Compile with custom focal loss
+        # Try loading SavedModel format first as it's most reliable
+        if tf_saved_model_exists:
+            print(f"Loading model from SavedModel format: {tf_saved_model_path}")
+            try:
+                # Try using standard SavedModel load
+                model = tf.saved_model.load(tf_saved_model_path)
+                print("Successfully loaded TF SavedModel!")
+                
+                # For SavedModel format, we need a special flag
+                model.is_saved_model = True
+                
+                # Also check if it has a serving signature
+                if hasattr(model, 'signatures') and 'serving_default' in model.signatures:
+                    print("SavedModel has a serving signature, which will be used for predictions")
+                else:
+                    print("SavedModel doesn't have a serving signature - using standard prediction")
+                    model.is_saved_model_without_signature = True
+            except Exception as e:
+                print(f"Error loading TF SavedModel: {e}")
+                tf_saved_model_exists = False
+        
+        # Try checkpoint file next
+        if model is None and checkpoint_exists:
+            print(f"Loading model from checkpoint: {checkpoint_path}")
+            try:
+                model = tf.keras.models.load_model(
+                    checkpoint_path,
+                    custom_objects=custom_objects,
+                    compile=False,
+                    safe_mode=False
+                )
+                print("Successfully loaded checkpoint model!")
+            except Exception as e:
+                print(f"Error loading checkpoint: {e}")
+                checkpoint_exists = False
+        
+        # If both SavedModel and checkpoint failed, try Keras format
+        if model is None and keras_exists:
+            print(f"Loading model from Keras format: {keras_path}")
+            try:
+                model = tf.keras.models.load_model(
+                    keras_path,
+                    custom_objects=custom_objects,
+                    compile=False,
+                    safe_mode=False
+                )
+                print("Successfully loaded Keras model!")
+            except Exception as e:
+                print(f"Error loading Keras model: {e}")
+                keras_exists = False
+        
+        # If all previous attempts failed, try H5 format
+        if model is None and h5_exists:
+            print(f"Loading model from H5 format: {h5_path}")
+            try:
+                model = tf.keras.models.load_model(
+                    h5_path,
+                    custom_objects=custom_objects,
+                    compile=False,
+                    safe_mode=False
+                )
+                print("Successfully loaded H5 model!")
+            except Exception as e:
+                print(f"Error loading H5 model: {e}")
+                h5_exists = False
+        
+        # If all loading attempts failed, create a fallback model
+        if model is None:
+            print("All loading attempts failed. Creating a fallback model...")
+            try:
+                # Create a simple model with DenseNet base to provide basic functionality
+                from tensorflow.keras.applications import DenseNet121
+                
+                base_model = DenseNet121(
+                    weights='imagenet',
+                    include_top=False,
+                    input_shape=(IMG_SIZE, IMG_SIZE, 3)
+                )
+                
+                inputs = tf.keras.layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+                x = base_model(inputs)
+                x = tf.keras.layers.GlobalAveragePooling2D()(x)
+                x = tf.keras.layers.Dense(512, activation='relu')(x)
+                x = tf.keras.layers.Dropout(0.5)(x)
+                outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+                
+                model = tf.keras.Model(inputs=inputs, outputs=outputs)
+                
+                print("WARNING: Using fallback model with ImageNet weights. Predictions will be unreliable.")
+            except Exception as e:
+                print(f"Error creating fallback model: {e}")
+                
+                # Create an extremely simple model as last resort
+                inputs = tf.keras.layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+                x = tf.keras.layers.GlobalAveragePooling2D()(inputs)
+                outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+                model = tf.keras.Model(inputs=inputs, outputs=outputs)
+                
+                print("WARNING: Using simple emergency fallback model. Predictions will be very unreliable.")
+        
+        # Compile the model if it's a Keras model (not needed for SavedModel)
+        if not hasattr(model, 'is_saved_model') and not hasattr(model, 'is_saved_model_without_signature'):
             model.compile(
                 optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
                 loss=sigmoid_focal_crossentropy,
@@ -192,90 +261,28 @@ async def lifespan(app: FastAPI):
                     tf.keras.metrics.Recall(name='recall')
                 ]
             )
-            
-            return model
         
-        print("Creating model with attention architecture...")
-        model = create_densenet_model_with_attention()
-        
-        # Try to load weights if the model file exists
-        if model_exists or h5_exists:
-            try:
-                # First attempt: Load using standard method with custom objects
-                if model_exists:
-                    print(f"Loading model from {MODEL_PATH}...")
-                    try:
-                        model = tf.keras.models.load_model(
-                            MODEL_PATH,
-                            custom_objects=custom_objects,
-                            compile=False,
-                            safe_mode=False
-                        )
-                        print("Successfully loaded model!")
-                    except Exception as e:
-                        print(f"Error loading model: {e}")
-                        
-                        # Second attempt: Try to load weights only
-                        try:
-                            print("Attempting to load weights only...")
-                            model.load_weights(MODEL_PATH)
-                            print("Successfully loaded weights!")
-                        except Exception as e2:
-                            print(f"Error loading weights: {e2}")
-                            
-                            # Third attempt: Try with H5 file
-                            if h5_exists:
-                                try:
-                                    print(f"Trying to load from H5 file: {h5_path}")
-                                    model.load_weights(h5_path)
-                                    print("Successfully loaded weights from H5!")
-                                except Exception as e3:
-                                    print(f"Error loading from H5: {e3}")
-                                    print("Creating new model with ImageNet weights - predictions may be unreliable")
-                
-                # If H5 exists but Keras doesn't
-                elif h5_exists:
-                    try:
-                        print(f"Loading from H5 file: {h5_path}")
-                        model.load_weights(h5_path)
-                        print("Successfully loaded weights from H5!")
-                    except Exception as e:
-                        print(f"Error loading from H5: {e}")
-                        print("Creating new model with ImageNet weights - predictions may be unreliable")
-                
-                # Compile the model with the same settings as training
-                model.compile(
-                    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
-                    loss=sigmoid_focal_crossentropy,
-                    metrics=[
-                        'accuracy',
-                        tf.keras.metrics.AUC(name='auc'),
-                        tf.keras.metrics.Precision(name='precision'),
-                        tf.keras.metrics.Recall(name='recall')
-                    ]
-                )
-                
-            except Exception as e:
-                print(f"Unexpected error during model loading: {e}")
-                print("Using model with ImageNet weights - predictions will be unreliable")
-        else:
-            print(f"Model file not found at {MODEL_PATH}")
-            print("Using model with ImageNet weights - predictions will be unreliable")
+        # Check if model is successfully loaded
+        if model is not None:
+            print("Model loaded successfully!")
             
-        # Print model summary for debugging
-        print("\nModel Summary:")
-        model.summary(line_length=100)
+            # Print model summary for Keras models only (SavedModel doesn't have summary)
+            if hasattr(model, 'summary') and not hasattr(model, 'is_saved_model') and not hasattr(model, 'is_saved_model_without_signature'):
+                print("\nModel Summary:")
+                model.summary(line_length=100)
+            else:
+                print("\nModel loaded in SavedModel format (summary not available)")
         
     except Exception as e:
-        print(f"Error setting up model: {e}")
-        print("Creating a simple fallback model...")
+        print(f"Unexpected error during model loading: {e}")
         
-        # Simple fallback model as last resort
-        inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+        # Create an extremely simple model as last resort
+        inputs = tf.keras.layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
         x = tf.keras.layers.GlobalAveragePooling2D()(inputs)
         outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
-        model = tf.keras.Model(inputs, outputs)
-        print("WARNING: Using simple fallback model. Predictions will be unreliable.")
+        model = tf.keras.Model(inputs=inputs, outputs=outputs)
+        
+        print("WARNING: Using simple emergency fallback model. Predictions will be very unreliable.")
     
     yield
     
@@ -359,8 +366,11 @@ async def root(request: Request):
 async def health_check():
     """Health check endpoint"""
     model_type = "Unknown"
+    
     if model is not None:
-        if isinstance(model, tf.keras.Model):
+        if hasattr(model, 'is_saved_model') or hasattr(model, 'is_saved_model_without_signature'):
+            model_type = "TensorFlow SavedModel format"
+        elif isinstance(model, tf.keras.Model):
             # Check for attention layers
             has_attention = False
             for layer in model.layers:
@@ -416,8 +426,50 @@ async def predict(file: UploadFile = File(...), threshold: Optional[float] = THR
         # Preprocess image
         img_array = preprocess_image(img)
         
-        # Make prediction with reduced verbosity
-        prediction = float(model.predict(img_array, verbose=0)[0][0])
+        # Make prediction based on model type
+        if hasattr(model, 'is_saved_model'):
+            # For SavedModel format with serving signature, use the signature
+            serving_fn = model.signatures['serving_default']
+            
+            # Get input tensor name from signature
+            input_name = list(serving_fn.structured_input_signature[1].keys())[0]
+            
+            # Make prediction
+            prediction_tensor = serving_fn(**{input_name: tf.convert_to_tensor(img_array)})
+            
+            # Get output tensor name from signature
+            output_name = list(prediction_tensor.keys())[0]
+            
+            # Extract prediction value
+            prediction = float(prediction_tensor[output_name].numpy()[0][0])
+            
+        elif hasattr(model, 'is_saved_model_without_signature'):
+            # For SavedModel without signature, this is trickier
+            # We'll try to call the model directly as a function, which works in some cases
+            try:
+                # Convert input to tensor
+                input_tensor = tf.convert_to_tensor(img_array)
+                
+                # Call model as function
+                output = model(input_tensor)
+                
+                # Try to extract prediction
+                if isinstance(output, dict):
+                    # If output is a dictionary, get the first value
+                    prediction = float(list(output.values())[0].numpy()[0][0])
+                else:
+                    # Otherwise try to get the first element
+                    prediction = float(output.numpy()[0][0])
+                
+            except Exception as inner_e:
+                print(f"Error using SavedModel without signature: {inner_e}")
+                # Fall back to a simple prediction value
+                prediction = 0.5  # Neutral prediction as fallback
+        else:
+            # For regular Keras model, use predict method
+            prediction = float(model.predict(img_array, verbose=0)[0][0])
+        
+        # Determine class based on threshold
         predicted_class = int(prediction > threshold)
         
         # Class names
