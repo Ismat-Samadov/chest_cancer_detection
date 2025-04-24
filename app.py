@@ -28,6 +28,11 @@ class ChannelAttention(tf.keras.layers.Layer):
     def __init__(self, ratio=8, **kwargs):
         super(ChannelAttention, self).__init__(**kwargs)
         self.ratio = ratio
+        self.gap = None
+        self.dense1 = None
+        self.dense2 = None
+        self.reshape = None
+        self.multiply = None
         
     def build(self, input_shape):
         channel = input_shape[-1]
@@ -63,6 +68,8 @@ class SpatialAttention(tf.keras.layers.Layer):
     def __init__(self, kernel_size=7, **kwargs):
         super(SpatialAttention, self).__init__(**kwargs)
         self.kernel_size = kernel_size
+        self.conv = None
+        self.multiply = None
         
     def build(self, input_shape):
         self.conv = tf.keras.layers.Conv2D(1, kernel_size=self.kernel_size, padding='same', activation='sigmoid')
@@ -118,14 +125,35 @@ async def lifespan(app: FastAPI):
         # Create directories if they don't exist
         os.makedirs("models", exist_ok=True)
         
-        # Create DenseNet model with attention
+        print("Looking for model file...")
+        model_exists = os.path.exists(MODEL_PATH)
+        h5_path = MODEL_PATH.replace(".keras", ".h5")
+        h5_exists = os.path.exists(h5_path)
+        
+        print(f"Model path exists: {model_exists}")
+        print(f"H5 path exists: {h5_exists}")
+        
+        # Define custom objects for model loading
+        custom_objects = {
+            'ChannelAttention': ChannelAttention,
+            'SpatialAttention': SpatialAttention,
+            'sigmoid_focal_crossentropy': sigmoid_focal_crossentropy
+        }
+        
+        # Enable unsafe deserialization for custom layers
+        keras.config.enable_unsafe_deserialization()
+        
+        # Create a model identical to the one used in training
         def create_densenet_model_with_attention():
-            """Create an enhanced DenseNet121-based model with attention"""
+            """Create an enhanced DenseNet121-based model with attention - matching training exactly"""
             base_model = tf.keras.applications.DenseNet121(
                 weights='imagenet',
                 include_top=False,
                 input_shape=(IMG_SIZE, IMG_SIZE, 3)
             )
+            
+            # Freeze base model
+            base_model.trainable = False
             
             inputs = tf.keras.layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
             
@@ -139,7 +167,7 @@ async def lifespan(app: FastAPI):
             
             x = tf.keras.layers.GlobalAveragePooling2D()(x)
             
-            # Dense layers with regularization
+            # Dense layers with regularization - match exactly with trainer.py
             x = tf.keras.layers.Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0015))(x)
             x = tf.keras.layers.BatchNormalization()(x)
             x = tf.keras.layers.Dropout(0.5)(x)
@@ -153,60 +181,91 @@ async def lifespan(app: FastAPI):
             
             model = tf.keras.Model(inputs, outputs)
             
+            # Compile with custom focal loss
+            model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                loss=sigmoid_focal_crossentropy,
+                metrics=[
+                    'accuracy',
+                    tf.keras.metrics.AUC(name='auc'),
+                    tf.keras.metrics.Precision(name='precision'),
+                    tf.keras.metrics.Recall(name='recall')
+                ]
+            )
+            
             return model
         
-        # Create the model with attention
         print("Creating model with attention architecture...")
         model = create_densenet_model_with_attention()
         
         # Try to load weights if the model file exists
-        if os.path.exists(MODEL_PATH):
+        if model_exists or h5_exists:
             try:
-                print(f"Loading weights from {MODEL_PATH}...")
-                
-                # Register custom objects
-                custom_objects = {
-                    'ChannelAttention': ChannelAttention,
-                    'SpatialAttention': SpatialAttention,
-                    'sigmoid_focal_crossentropy': sigmoid_focal_crossentropy
-                }
-                
-                # Enable unsafe deserialization
-                keras.config.enable_unsafe_deserialization()
-                
-                # Try to load the model directly
-                try:
-                    temp_model = tf.keras.models.load_model(
-                        MODEL_PATH,
-                        custom_objects=custom_objects,
-                        compile=False,
-                        safe_mode=False
-                    )
-                    
-                    # If successful, use the loaded model
-                    model = temp_model
-                    print("Successfully loaded model!")
-                except Exception as e:
-                    print(f"Could not load model directly: {e}")
-                    
-                    # Try to load weights from h5 file instead
-                    h5_path = MODEL_PATH.replace(".keras", ".h5")
-                    if os.path.exists(h5_path):
+                # First attempt: Load using standard method with custom objects
+                if model_exists:
+                    print(f"Loading model from {MODEL_PATH}...")
+                    try:
+                        model = tf.keras.models.load_model(
+                            MODEL_PATH,
+                            custom_objects=custom_objects,
+                            compile=False,
+                            safe_mode=False
+                        )
+                        print("Successfully loaded model!")
+                    except Exception as e:
+                        print(f"Error loading model: {e}")
+                        
+                        # Second attempt: Try to load weights only
                         try:
-                            print(f"Trying to load weights from {h5_path}...")
-                            model.load_weights(h5_path)
-                            print("Successfully loaded weights from h5 file!")
+                            print("Attempting to load weights only...")
+                            model.load_weights(MODEL_PATH)
+                            print("Successfully loaded weights!")
                         except Exception as e2:
-                            print(f"Could not load weights from h5 file: {e2}")
-                            print("Using model with ImageNet weights - predictions will be unreliable")
-                    else:
-                        print("No h5 file found, using model with ImageNet weights - predictions will be unreliable")
+                            print(f"Error loading weights: {e2}")
+                            
+                            # Third attempt: Try with H5 file
+                            if h5_exists:
+                                try:
+                                    print(f"Trying to load from H5 file: {h5_path}")
+                                    model.load_weights(h5_path)
+                                    print("Successfully loaded weights from H5!")
+                                except Exception as e3:
+                                    print(f"Error loading from H5: {e3}")
+                                    print("Creating new model with ImageNet weights - predictions may be unreliable")
+                
+                # If H5 exists but Keras doesn't
+                elif h5_exists:
+                    try:
+                        print(f"Loading from H5 file: {h5_path}")
+                        model.load_weights(h5_path)
+                        print("Successfully loaded weights from H5!")
+                    except Exception as e:
+                        print(f"Error loading from H5: {e}")
+                        print("Creating new model with ImageNet weights - predictions may be unreliable")
+                
+                # Compile the model with the same settings as training
+                model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                    loss=sigmoid_focal_crossentropy,
+                    metrics=[
+                        'accuracy',
+                        tf.keras.metrics.AUC(name='auc'),
+                        tf.keras.metrics.Precision(name='precision'),
+                        tf.keras.metrics.Recall(name='recall')
+                    ]
+                )
+                
             except Exception as e:
-                print(f"Error during model loading: {e}")
+                print(f"Unexpected error during model loading: {e}")
                 print("Using model with ImageNet weights - predictions will be unreliable")
         else:
             print(f"Model file not found at {MODEL_PATH}")
             print("Using model with ImageNet weights - predictions will be unreliable")
+            
+        # Print model summary for debugging
+        print("\nModel Summary:")
+        model.summary(line_length=100)
+        
     except Exception as e:
         print(f"Error setting up model: {e}")
         print("Creating a simple fallback model...")
@@ -378,5 +437,12 @@ async def predict(file: UploadFile = File(...), threshold: Optional[float] = THR
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=8080, help="Port to run the application on")
+    args = parser.parse_args()
+    
+    port = int(os.environ.get("PORT", args.port))
     uvicorn.run("app:app", host="0.0.0.0", port=port, log_level="info")
