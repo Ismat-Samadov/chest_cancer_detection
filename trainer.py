@@ -312,17 +312,17 @@ def create_attention_module(x, ratio=8):
     return x
 
 def create_spatial_attention_module(x):
-    """
-    Create a spatial attention module
+def create_spatial_attention_module(x):
+    """Create a spatial attention module using dedicated layers instead of Lambda"""
+    # Max pooling across channels
+    max_pool = tf.keras.layers.MaxPool2D(pool_size=(1, 1), data_format='channels_last')(x)
     
-    Why: Spatial attention helps the model focus on specific regions
-    in the image that are most likely to contain cancer indicators.
-    """
-    # Generate max pooled features using Keras layers
-    max_pool = tf.keras.layers.Lambda(lambda x: tf.reduce_max(x, axis=3, keepdims=True))(x)
-    
-    # Generate average pooled features using Keras layers
-    avg_pool = tf.keras.layers.Lambda(lambda x: tf.reduce_mean(x, axis=3, keepdims=True))(x)
+    # Average pooling across channels using a custom layer
+    class ChannelAveragePooling(tf.keras.layers.Layer):
+        def call(self, inputs):
+            return tf.reduce_mean(inputs, axis=3, keepdims=True)
+            
+    avg_pool = ChannelAveragePooling()(x)
     
     # Concatenate pool features
     concat = tf.keras.layers.Concatenate(axis=3)([max_pool, avg_pool])
@@ -334,7 +334,6 @@ def create_spatial_attention_module(x):
     x = Multiply()([x, attention])
     
     return x
-
 
 # -------------------------------------------------------
 # Enhanced Model Architectures
