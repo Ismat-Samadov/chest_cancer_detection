@@ -1,17 +1,14 @@
-# Improved Chest CT Cancer Binary Classification without TensorFlow Addons
-# -------------------------------------------------------
-# Enhanced implementation with multiple model architectures and advanced techniques
+# Chest CT Cancer Binary Classification with Built-in Components
+# -------------------------------------------------------------
 
-# Import necessary libraries
 import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import tensorflow as tf
-from tensorflow.keras.models import Model
+from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Input, Dropout, BatchNormalization, Concatenate
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, AveragePooling2D, Flatten, Add, Multiply
-from tensorflow.keras.applications import DenseNet121, ResNet50, EfficientNetB0
+from tensorflow.keras.applications import DenseNet121, ResNet50V2, EfficientNetB0
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
@@ -19,30 +16,37 @@ from tensorflow.keras.regularizers import l2
 from tensorflow.keras.losses import binary_crossentropy
 from PIL import Image, ImageEnhance, ImageOps
 from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
-from sklearn.model_selection import KFold
-import seaborn as sns
+import datetime
 
-# Custom implementation of Focal Loss to replace TensorFlow Addons
+# Set random seeds for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# Define constants
+IMG_SIZE = 256
+BATCH_SIZE = 16
+EPOCHS = 30
+BASE_DIR = "/kaggle/input/chest-ctscan-images/Data"
+MODELS_DIR = "models"
+PLOTS_DIR = "plots"
+USE_ENSEMBLE = True
+MODEL_ARCHITECTURE = "ensemble"  # "densenet", "resnet", "efficientnet", or "ensemble"
+APPLY_MIXUP = True
+
+# Create directories for outputs
+os.makedirs(MODELS_DIR, exist_ok=True)
+os.makedirs(PLOTS_DIR, exist_ok=True)
+
+# Custom focal loss implementation
 def sigmoid_focal_crossentropy(y_true, y_pred, alpha=0.25, gamma=2.0):
-    """
-    Custom implementation of Focal Loss
-    
-    Args:
-        y_true: Ground truth values
-        y_pred: Predicted values
-        alpha: Weighting factor for the rare class
-        gamma: Focusing parameter that reduces the loss for well-classified examples
-        
-    Returns:
-        Focal loss value
-    """
+    """Implementation of focal loss for improved training on imbalanced data"""
     # Get binary crossentropy
     bce = binary_crossentropy(y_true, y_pred)
     
-    # Convert y_true to float32 if needed
+    # Convert y_true to float32
     y_true = tf.cast(y_true, dtype=tf.float32)
     
-    # Calculate the modulating factor
+    # Calculate the focal loss factors
     p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
     alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
     modulating_factor = tf.pow((1.0 - p_t), gamma)
@@ -50,30 +54,7 @@ def sigmoid_focal_crossentropy(y_true, y_pred, alpha=0.25, gamma=2.0):
     # Apply the factors and return
     return alpha_factor * modulating_factor * bce
 
-# Set random seeds for reproducibility
-np.random.seed(42)
-tf.random.set_seed(42)
-
-# Define constants
-IMG_SIZE = 256  # Increased from 224 for more detail
-BATCH_SIZE = 16
-EPOCHS = 30  # More epochs for improved architectures
-BASE_DIR = "/kaggle/input/chest-ctscan-images/Data"
-MODELS_DIR = "models"
-PLOTS_DIR = "plots"
-USE_ENSEMBLE = True  # Set to True to use ensemble of models
-MODEL_ARCHITECTURE = "densenet"  # Options: "densenet", "resnet", "efficientnet", "ensemble"
-USE_ATTENTION = True  # Use attention mechanisms
-APPLY_MIXUP = True  # Apply mixup augmentation
-
-# Create directories for outputs
-os.makedirs(MODELS_DIR, exist_ok=True)
-os.makedirs(PLOTS_DIR, exist_ok=True)
-
-# -------------------------------------------------------
-# Enhanced Preprocessing Functions
-# -------------------------------------------------------
-
+# Enhanced preprocessing functions
 def apply_clahe(img, chance=0.5):
     """Apply CLAHE with enhanced parameters for better contrast in CT scans"""
     if np.random.random() < chance:
@@ -106,18 +87,12 @@ def apply_random_sharpness(img, chance=0.5, factor_range=(0.5, 2.2)):
     return img
 
 def apply_windowing(img, chance=0.4, window_width_range=(1500, 2500), window_center_range=(-600, 500)):
-    """
-    Apply CT windowing to enhance specific tissues
-    
-    Why: CT windowing is a domain-specific technique that adjusts contrast
-    to highlight specific tissue types based on their Hounsfield units
-    """
+    """Apply CT windowing to enhance specific tissues"""
     if np.random.random() < chance:
         if not isinstance(img, np.ndarray):
             img = np.array(img)
         
         # Simulate Hounsfield unit range (normally from -1000 to +1000)
-        # For this example we scale 0-1 to -1000 to +1000
         hu_img = (img * 2000) - 1000
         
         # Randomly select window width and center
@@ -144,56 +119,33 @@ def custom_preprocessing(img):
     img = apply_windowing(img, chance=0.3)
     return img
 
-# -------------------------------------------------------
-# MixUp Augmentation
-# -------------------------------------------------------
-
-def mixup_augmentation(x, y, alpha=0.2):
-    """
-    Apply MixUp augmentation with proper data type handling
-    """
-    # Convert inputs to tensors with appropriate types
-    x = tf.convert_to_tensor(x, dtype=tf.float32)
-    y = tf.convert_to_tensor(y, dtype=tf.float32)  # Convert labels to float
-    
-    batch_size = tf.shape(x)[0]
-    
-    # Create indices for shuffling
-    indices = tf.random.shuffle(tf.range(batch_size))
+# MixUp augmentation implementation
+def mixup_data(x, y, alpha=0.2):
+    """Perform MixUp augmentation on batch"""
+    batch_size = x.shape[0]
+    indices = np.random.permutation(batch_size)
     
     # Sample lambda from beta distribution
-    random_lambda = tf.random.stateless_gamma([batch_size], seed=[42, 0], alpha=alpha) / \
-                    tf.random.stateless_gamma([batch_size], seed=[42, 1], alpha=alpha)
-    random_lambda = tf.minimum(random_lambda, 1.0)
+    lam = np.random.beta(alpha, alpha, batch_size)
+    lam = np.maximum(lam, 1 - lam)
+    lam_x = np.reshape(lam, (batch_size, 1, 1, 1))
+    lam_y = np.reshape(lam, (batch_size, 1))
     
-    # Reshape lambda for broadcasting with images
-    random_lambda_x = tf.reshape(random_lambda, [batch_size, 1, 1, 1])
-    
-    # Apply mixup to images
-    shuffled_x = tf.gather(x, indices)
-    mixed_x = random_lambda_x * x + (1.0 - random_lambda_x) * shuffled_x
-    
-    # Apply mixup to labels
-    random_lambda_y = tf.reshape(random_lambda, [batch_size])
-    shuffled_y = tf.gather(y, indices)
-    mixed_y = random_lambda_y * y + (1.0 - random_lambda_y) * shuffled_y
+    # Apply mixup
+    mixed_x = lam_x * x + (1 - lam_x) * x[indices]
+    mixed_y = lam_y * y + (1 - lam_y) * y[indices]
     
     return mixed_x, mixed_y
 
-# -------------------------------------------------------
-# Enhanced Data Generator with MixUp
-# -------------------------------------------------------
-
-class EnhancedBalancedGenerator(tf.keras.utils.Sequence):
+# Enhanced Balanced Generator
+class BalancedGenerator(tf.keras.utils.Sequence):
     def __init__(self, dataframe, batch_size=16, target_size=(256, 256), 
-                 shuffle=True, datagen=None, balanced=True, apply_mixup=False):
-        """Enhanced generator with MixUp capability"""
+                 shuffle=True, augment=True, apply_mixup=False):
         self.dataframe = dataframe
         self.batch_size = batch_size
         self.target_size = target_size
         self.shuffle = shuffle
-        self.datagen = datagen if datagen is not None else ImageDataGenerator(rescale=1./255)
-        self.balanced = balanced
+        self.augment = augment
         self.apply_mixup = apply_mixup
         
         # Split indices by class
@@ -203,13 +155,25 @@ class EnhancedBalancedGenerator(tf.keras.utils.Sequence):
         # Check if we have both classes
         self.has_both_classes = len(self.normal_indices) > 0 and len(self.cancer_indices) > 0
         
-        if self.balanced and not self.has_both_classes:
-            print(f"WARNING: Can't create balanced batches. Normal samples: {len(self.normal_indices)}, "
-                  f"Cancer samples: {len(self.cancer_indices)}. Switching to unbalanced sampling.")
-            self.balanced = False
+        # Number of batches
+        self.batches_per_epoch = 75 if self.has_both_classes else max(1, len(dataframe) // batch_size)
         
-        # Number of batches - increased for better training
-        self.batches_per_epoch = 75 if self.balanced else max(1, len(dataframe) // batch_size)
+        # Create augmentation generator
+        if self.augment:
+            self.datagen = ImageDataGenerator(
+                preprocessing_function=custom_preprocessing,
+                rotation_range=30,
+                width_shift_range=0.2,
+                height_shift_range=0.2,
+                shear_range=0.1,
+                zoom_range=0.2,
+                horizontal_flip=True,
+                vertical_flip=True,
+                brightness_range=[0.8, 1.2],
+                fill_mode='reflect'
+            )
+        else:
+            self.datagen = ImageDataGenerator(rescale=1./255)
         
         # Reset state for each epoch
         self.on_epoch_end()
@@ -220,7 +184,7 @@ class EnhancedBalancedGenerator(tf.keras.utils.Sequence):
     def __getitem__(self, idx):
         batch_indices = []
         
-        if self.balanced and self.has_both_classes:
+        if self.has_both_classes:
             # For each batch, select half normal and half cancer
             half_batch = self.batch_size // 2
             
@@ -233,7 +197,7 @@ class EnhancedBalancedGenerator(tf.keras.utils.Sequence):
             if self.shuffle:
                 np.random.shuffle(batch_indices)
         else:
-            # For unbalanced batches, just select randomly from all indices
+            # For unbalanced batches
             idx_offset = (idx * self.batch_size) % len(self.dataframe)
             batch_indices = np.arange(idx_offset, min(idx_offset + self.batch_size, len(self.dataframe)))
             if self.shuffle:
@@ -254,13 +218,11 @@ class EnhancedBalancedGenerator(tf.keras.utils.Sequence):
                 img = img.convert('RGB')  # Ensure 3 channels
                 img_array = np.array(img) / 255.0  # Normalize
                 
-                # Apply data augmentation if available
-                if self.datagen is not None:
-                    # Convert to batch of 1 for augmentation
+                # Apply augmentation
+                if self.augment:
                     img_array = np.expand_dims(img_array, axis=0)
-                    # Get augmented image
-                    augmented = next(self.datagen.flow(img_array, batch_size=1, shuffle=False))
-                    img_array = augmented[0]
+                    augmented = self.datagen.flow(img_array, batch_size=1, shuffle=False)
+                    img_array = next(augmented)[0]
                 
                 batch_x.append(img_array)
                 batch_y.append(class_label)
@@ -274,7 +236,7 @@ class EnhancedBalancedGenerator(tf.keras.utils.Sequence):
         
         # Apply MixUp if enabled
         if self.apply_mixup and len(batch_x) > 1:
-            batch_x, batch_y = mixup_augmentation(batch_x, batch_y, alpha=0.2)
+            batch_x, batch_y = mixup_data(batch_x, batch_y, alpha=0.2)
         
         return batch_x, batch_y
     
@@ -284,137 +246,52 @@ class EnhancedBalancedGenerator(tf.keras.utils.Sequence):
             np.random.shuffle(self.normal_indices)
             np.random.shuffle(self.cancer_indices)
 
-# -------------------------------------------------------
-# Attention Mechanisms with Custom Layers
-# -------------------------------------------------------
+# Corrected attention module using Keras layers only
+def add_attention_module(x, ratio=8, name=None):
+    """Add attention module using Keras layers (Squeeze-and-Excitation)"""
+    channel = x.shape[-1]
+    
+    # Squeeze operation (global information embedding)
+    se = tf.keras.layers.GlobalAveragePooling2D()(x)
+    
+    # Excitation operation (adaptive recalibration)
+    se = tf.keras.layers.Dense(channel // ratio, activation='relu')(se)
+    se = tf.keras.layers.Dense(channel, activation='sigmoid')(se)
+    
+    # Reshape for broadcasting using Keras reshape layer
+    se = tf.keras.layers.Reshape((1, 1, channel))(se)
+    
+    # Scale the input using Keras multiply layer
+    x = tf.keras.layers.Multiply()([x, se])
+    
+    return x
 
-class ChannelAttention(tf.keras.layers.Layer):
-    """Custom Channel Attention layer implementation"""
-    def __init__(self, ratio=8, **kwargs):
-        super(ChannelAttention, self).__init__(**kwargs)
-        self.ratio = ratio
-        
-    def build(self, input_shape):
-        channel = input_shape[-1]
-        self.gap = GlobalAveragePooling2D()
-        self.dense1 = Dense(channel // self.ratio, activation='relu', 
-                         kernel_initializer='he_normal', use_bias=False)
-        self.dense2 = Dense(channel, activation='sigmoid', 
-                         kernel_initializer='he_normal', use_bias=False)
-        self.reshape = tf.keras.layers.Reshape((1, 1, channel))
-        self.multiply = Multiply()
-        
-        super(ChannelAttention, self).build(input_shape)
-        
-    def call(self, inputs):
-        gap = self.gap(inputs)
-        dense1 = self.dense1(gap)
-        dense2 = self.dense2(dense1)
-        reshape = self.reshape(dense2)
-        
-        return self.multiply([inputs, reshape])
+# Corrected spatial attention module using Keras layers only
+def add_spatial_attention(x, kernel_size=7, name=None):
+    """Add spatial attention module using Keras layers"""
+    # Max pooling along channel axis using Lambda layer
+    max_pool = tf.keras.layers.Lambda(
+        lambda x: tf.reduce_max(x, axis=3, keepdims=True)
+    )(x)
     
-    def compute_output_shape(self, input_shape):
-        return input_shape
+    # Average pooling along channel axis using Lambda layer
+    avg_pool = tf.keras.layers.Lambda(
+        lambda x: tf.reduce_mean(x, axis=3, keepdims=True)
+    )(x)
     
-    def get_config(self):
-        config = super(ChannelAttention, self).get_config()
-        config.update({
-            'ratio': self.ratio
-        })
-        return config
-
-class ChannelMaxPooling(tf.keras.layers.Layer):
-    """Custom layer for max pooling across channels"""
-    def __init__(self, **kwargs):
-        super(ChannelMaxPooling, self).__init__(**kwargs)
+    # Concatenate features using Keras concatenate layer
+    concat = tf.keras.layers.Concatenate(axis=3)([max_pool, avg_pool])
     
-    def call(self, inputs):
-        return tf.reduce_max(inputs, axis=3, keepdims=True)
+    # Apply convolution using Keras Conv2D
+    attention = tf.keras.layers.Conv2D(1, kernel_size=kernel_size, padding='same', activation='sigmoid')(concat)
     
-    def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[1], input_shape[2], 1)
+    # Apply attention using Keras multiply layer
+    x = tf.keras.layers.Multiply()([x, attention])
     
-    def get_config(self):
-        config = super(ChannelMaxPooling, self).get_config()
-        return config
-
-class ChannelAvgPooling(tf.keras.layers.Layer):
-    """Custom layer for average pooling across channels"""
-    def __init__(self, **kwargs):
-        super(ChannelAvgPooling, self).__init__(**kwargs)
-    
-    def call(self, inputs):
-        return tf.reduce_mean(inputs, axis=3, keepdims=True)
-    
-    def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[1], input_shape[2], 1)
-    
-    def get_config(self):
-        config = super(ChannelAvgPooling, self).get_config()
-        return config
-
-class SpatialAttention(tf.keras.layers.Layer):
-    """Custom Spatial Attention layer implementation"""
-    def __init__(self, kernel_size=7, **kwargs):
-        super(SpatialAttention, self).__init__(**kwargs)
-        self.kernel_size = kernel_size
-        
-    def build(self, input_shape):
-        self.channel_max_pool = ChannelMaxPooling()
-        self.channel_avg_pool = ChannelAvgPooling()
-        self.concat = tf.keras.layers.Concatenate(axis=3)
-        self.conv = Conv2D(1, kernel_size=self.kernel_size, padding='same', activation='sigmoid')
-        self.multiply = Multiply()
-        super(SpatialAttention, self).build(input_shape)
-        
-    def call(self, inputs):
-        # Max pool along channel dimension
-        max_pool = self.channel_max_pool(inputs)
-        # Average pool along channel dimension
-        avg_pool = self.channel_avg_pool(inputs)
-        # Concatenate
-        concat = self.concat([max_pool, avg_pool])
-        # Apply convolution
-        attention_map = self.conv(concat)
-        # Apply attention
-        return self.multiply([inputs, attention_map])
-    
-    def compute_output_shape(self, input_shape):
-        return input_shape
-    
-    def get_config(self):
-        config = super(SpatialAttention, self).get_config()
-        config.update({
-            'kernel_size': self.kernel_size
-        })
-        return config
-
-def create_attention_module(x, ratio=8):
-    """
-    Create a channel attention module using custom layer
-    
-    Why: Attention mechanisms help the model focus on relevant areas of the image
-    and ignore irrelevant parts, which is particularly important for detecting
-    subtle cancer features in CT scans.
-    """
-    return ChannelAttention(ratio=ratio)(x)
-
-def create_spatial_attention_module(x):
-    """
-    Create a spatial attention module using custom layer
-    
-    Why: Spatial attention helps the model focus on specific regions
-    in the image that are most likely to contain cancer indicators.
-    """
-    return SpatialAttention(kernel_size=7)(x)
-
-# -------------------------------------------------------
-# Enhanced Model Architectures
-# -------------------------------------------------------
-
-def create_densenet_model(use_attention=False):
-    """Create an enhanced DenseNet121-based model with attention"""
+    return x
+# Create DenseNet model with built-in attention
+def create_densenet_model(use_attention=True):
+    """Create a DenseNet121-based model using built-in components"""
     base_model = DenseNet121(
         weights='imagenet',
         include_top=False,
@@ -426,18 +303,18 @@ def create_densenet_model(use_attention=False):
     
     inputs = Input(shape=(IMG_SIZE, IMG_SIZE, 3))
     
-    # Gaussian noise for robustness
+    # Add Gaussian noise for robustness
     x = tf.keras.layers.GaussianNoise(0.1)(inputs)
     x = base_model(x, training=False)
     
     # Apply attention if enabled
     if use_attention:
-        x = create_attention_module(x)
-        x = create_spatial_attention_module(x)
+        x = add_attention_module(x, ratio=8)
+        x = add_spatial_attention(x, kernel_size=7)
     
     x = GlobalAveragePooling2D()(x)
     
-    # Enhanced dense layers with stronger regularization
+    # Dense layers with regularization
     x = Dense(512, activation='relu', kernel_regularizer=l2(0.0015))(x)
     x = BatchNormalization()(x)
     x = Dropout(0.5)(x)
@@ -465,9 +342,10 @@ def create_densenet_model(use_attention=False):
     
     return model, base_model
 
-def create_resnet_model(use_attention=False):
-    """Create a ResNet50-based model with attention"""
-    base_model = ResNet50(
+# Create ResNet model with built-in attention
+def create_resnet_model(use_attention=True):
+    """Create a ResNet50V2-based model using built-in components"""
+    base_model = ResNet50V2(
         weights='imagenet',
         include_top=False,
         input_shape=(IMG_SIZE, IMG_SIZE, 3)
@@ -478,14 +356,14 @@ def create_resnet_model(use_attention=False):
     
     inputs = Input(shape=(IMG_SIZE, IMG_SIZE, 3))
     
-    # Gaussian noise for robustness
+    # Add Gaussian noise for robustness
     x = tf.keras.layers.GaussianNoise(0.1)(inputs)
     x = base_model(x, training=False)
     
     # Apply attention if enabled
     if use_attention:
-        x = create_attention_module(x)
-        x = create_spatial_attention_module(x)
+        x = add_attention_module(x, ratio=8)
+        x = add_spatial_attention(x, kernel_size=7)
     
     x = GlobalAveragePooling2D()(x)
     
@@ -517,8 +395,9 @@ def create_resnet_model(use_attention=False):
     
     return model, base_model
 
-def create_efficientnet_model(use_attention=False):
-    """Create an EfficientNetB0-based model with attention"""
+# Create EfficientNet model with built-in attention
+def create_efficientnet_model(use_attention=True):
+    """Create an EfficientNetB0-based model using built-in components"""
     base_model = EfficientNetB0(
         weights='imagenet',
         include_top=False,
@@ -530,18 +409,18 @@ def create_efficientnet_model(use_attention=False):
     
     inputs = Input(shape=(IMG_SIZE, IMG_SIZE, 3))
     
-    # Gaussian noise for robustness
+    # Add Gaussian noise for robustness
     x = tf.keras.layers.GaussianNoise(0.1)(inputs)
     x = base_model(x, training=False)
     
     # Apply attention if enabled
     if use_attention:
-        x = create_attention_module(x)
-        x = create_spatial_attention_module(x)
+        x = add_attention_module(x, ratio=8)
+        x = add_spatial_attention(x, kernel_size=7)
     
     x = GlobalAveragePooling2D()(x)
     
-    # Dense layers with regularization - using ReLU instead of Swish for compatibility
+    # Dense layers with regularization
     x = Dense(512, activation='relu', kernel_regularizer=l2(0.001))(x)
     x = BatchNormalization()(x)
     x = Dropout(0.5)(x)
@@ -569,28 +448,23 @@ def create_efficientnet_model(use_attention=False):
     
     return model, base_model
 
-def create_ensemble_model(use_attention=False):
-    """
-    Create an ensemble of multiple models for better performance
-    
-    Why: Ensemble models combine predictions from different architectures,
-    capturing different aspects of the images and generally achieving
-    better performance than any single model.
-    """
-    # Create individual models
-    densenet_model, _ = create_densenet_model(use_attention)
-    resnet_model, _ = create_resnet_model(use_attention)
-    efficientnet_model, _ = create_efficientnet_model(use_attention)
-    
-    # Common input
+# Create ensemble model
+def create_ensemble_model():
+    """Create an ensemble of multiple model architectures"""
+    # Input layer
     input_layer = Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+    
+    # Create individual models
+    densenet_model, _ = create_densenet_model(use_attention=True)
+    resnet_model, _ = create_resnet_model(use_attention=True)
+    efficientnet_model, _ = create_efficientnet_model(use_attention=True)
     
     # Get predictions from each model
     densenet_output = densenet_model(input_layer)
     resnet_output = resnet_model(input_layer)
     efficientnet_output = efficientnet_model(input_layer)
     
-    # Combine predictions (weighted average)
+    # Average predictions
     ensemble_output = tf.keras.layers.Average()([
         densenet_output,
         resnet_output,
@@ -612,43 +486,77 @@ def create_ensemble_model(use_attention=False):
         ]
     )
     
-    return ensemble_model, None
+    return ensemble_model
 
-# -------------------------------------------------------
-# Create Binary Dataset for Training
-# -------------------------------------------------------
-
-def create_binary_dataset(base_dir, mode):
+# Test-time augmentation
+def test_time_augmentation(model, image, num_augmentations=5):
     """
-    Create a dataframe of image paths and binary labels (0=normal, 1=cancer)
+    Apply test-time augmentation for more robust predictions
     
     Args:
-        base_dir: Base directory containing class folders
-        mode: 'train', 'valid', or 'test'
-    
+        model: Trained model
+        image: Input image (should be preprocessed)
+        num_augmentations: Number of augmentations to perform
+        
     Returns:
-        DataFrame with 'filename' and 'class' columns
+        Average prediction across augmentations
     """
-    directory = os.path.join(BASE_DIR, mode)
+    # Create augmentation generator
+    datagen = ImageDataGenerator(
+        rotation_range=20,
+        width_shift_range=0.1,
+        height_shift_range=0.1,
+        zoom_range=0.1,
+        horizontal_flip=True,
+        vertical_flip=True,
+        fill_mode='nearest'
+    )
+    
+    # Expand dimensions for batch
+    image_batch = np.expand_dims(image, axis=0)
+    
+    # Initialize predictions
+    predictions = []
+    
+    # Original prediction
+    predictions.append(model.predict(image_batch)[0])
+    
+    # Augmented predictions
+    augmented = datagen.flow(image_batch, batch_size=1)
+    for i in range(num_augmentations):
+        aug_image = next(augmented)[0]
+        pred = model.predict(np.expand_dims(aug_image, axis=0))[0]
+        predictions.append(pred)
+    
+    # Return average prediction
+    return np.mean(predictions, axis=0)
+
+# Create dataset
+def create_binary_dataset(base_dir, mode):
+    """Create a dataframe of image paths and binary labels (0=normal, 1=cancer)"""
+    directory = os.path.join(base_dir, mode)
+    
+    # Get all classes
     cancer_classes = [c for c in os.listdir(directory) if c != 'normal']
     all_classes = ['normal'] + cancer_classes
     
     paths = []
     labels = []
     
-    for i, class_name in enumerate(all_classes):
+    for class_name in all_classes:
         class_dir = os.path.join(directory, class_name)
         if os.path.exists(class_dir):
             files = [os.path.join(class_dir, f) for f in os.listdir(class_dir) 
                     if f.endswith(('.png', '.jpg', '.jpeg'))]
             paths.extend(files)
+            
             # 0 for normal, 1 for any cancer type
             label = 0 if class_name == 'normal' else 1
             labels.extend([label] * len(files))
     
     return pd.DataFrame({'filename': paths, 'class': labels})
 
-# Create dataframes for each split
+# Create datasets
 train_df = create_binary_dataset(BASE_DIR, 'train')
 valid_df = create_binary_dataset(BASE_DIR, 'valid')
 test_df = create_binary_dataset(BASE_DIR, 'test')
@@ -659,48 +567,35 @@ print(f"Training: {train_df['class'].value_counts()}")
 print(f"Validation: {valid_df['class'].value_counts()}")
 print(f"Testing: {test_df['class'].value_counts()}")
 
-# -------------------------------------------------------
-# Enhanced Training and Evaluation Workflow
-# -------------------------------------------------------
-
 # Create data generators
-train_datagen = ImageDataGenerator(
-    preprocessing_function=custom_preprocessing,
-    rescale=1./255,
-    rotation_range=30,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    shear_range=0.1,
-    zoom_range=0.2,
-    horizontal_flip=True,
-    vertical_flip=True,
-    brightness_range=[0.8, 1.2],
-    fill_mode='reflect'
+train_generator = BalancedGenerator(
+    train_df, 
+    batch_size=BATCH_SIZE,
+    target_size=(IMG_SIZE, IMG_SIZE),
+    augment=True,
+    apply_mixup=APPLY_MIXUP
 )
 
-valid_datagen = ImageDataGenerator(rescale=1./255)
-test_datagen = ImageDataGenerator(rescale=1./255)
+valid_generator = BalancedGenerator(
+    valid_df,
+    batch_size=BATCH_SIZE,
+    target_size=(IMG_SIZE, IMG_SIZE),
+    augment=False,
+    shuffle=False
+)
 
-# Select model architecture based on configuration
-if MODEL_ARCHITECTURE == "densenet":
-    model, base_model = create_densenet_model(USE_ATTENTION)
-elif MODEL_ARCHITECTURE == "resnet":
-    model, base_model = create_resnet_model(USE_ATTENTION)
-elif MODEL_ARCHITECTURE == "efficientnet":
-    model, base_model = create_efficientnet_model(USE_ATTENTION)
-elif MODEL_ARCHITECTURE == "ensemble":
-    model, base_model = create_ensemble_model(USE_ATTENTION)
-else:
-    print(f"Unknown architecture: {MODEL_ARCHITECTURE}. Using DenseNet as default.")
-    model, base_model = create_densenet_model(USE_ATTENTION)
+test_generator = BalancedGenerator(
+    test_df,
+    batch_size=BATCH_SIZE,
+    target_size=(IMG_SIZE, IMG_SIZE),
+    augment=False,
+    shuffle=False
+)
 
-# Print model summary
-model.summary()
-
-# Enhanced callbacks
+# Create callbacks
 callbacks = [
     EarlyStopping(
-        monitor='val_auc',  # Monitor AUC instead of accuracy for medical tasks
+        monitor='val_auc',
         patience=10,
         restore_best_weights=True,
         verbose=1
@@ -717,44 +612,37 @@ callbacks = [
         monitor='val_auc',
         save_best_only=True,
         verbose=1
-    ),
-    # Add TensorBoard for better visualization
-    tf.keras.callbacks.TensorBoard(
-        log_dir=os.path.join('logs', MODEL_ARCHITECTURE),
-        histogram_freq=1
     )
 ]
 
-# Use the enhanced generator
-train_generator = EnhancedBalancedGenerator(
-    train_df, 
-    batch_size=BATCH_SIZE,
-    target_size=(IMG_SIZE, IMG_SIZE),
-    datagen=train_datagen,
-    balanced=True,
-    apply_mixup=APPLY_MIXUP
-)
-
-valid_generator = EnhancedBalancedGenerator(
-    valid_df,
-    batch_size=BATCH_SIZE,
-    target_size=(IMG_SIZE, IMG_SIZE),
-    datagen=valid_datagen,
-    shuffle=False,
-    balanced=True
-)
-
-test_generator = EnhancedBalancedGenerator(
-    test_df,
-    batch_size=BATCH_SIZE,
-    target_size=(IMG_SIZE, IMG_SIZE),
-    datagen=test_datagen,
-    shuffle=False,
-    balanced=False
-)
-
-# Phase 1: Train only the top layers (if not using ensemble)
-if base_model is not None:
+# Train model based on selected architecture
+if MODEL_ARCHITECTURE == "ensemble":
+    # Create ensemble model
+    model = create_ensemble_model()
+    
+    # Train ensemble model
+    history = model.fit(
+        train_generator,
+        steps_per_epoch=train_generator.batches_per_epoch,
+        validation_data=valid_generator,
+        validation_steps=len(valid_generator),
+        epochs=EPOCHS,
+        callbacks=callbacks,
+        verbose=1
+    )
+    
+    history_combined = history.history
+    
+else:
+    # Create single architecture model
+    if MODEL_ARCHITECTURE == "densenet":
+        model, base_model = create_densenet_model(use_attention=True)
+    elif MODEL_ARCHITECTURE == "resnet":
+        model, base_model = create_resnet_model(use_attention=True)
+    elif MODEL_ARCHITECTURE == "efficientnet":
+        model, base_model = create_efficientnet_model(use_attention=True)
+    
+    # Phase 1: Train only the top layers
     print("Phase 1: Training top layers with frozen base model...")
     history_phase1 = model.fit(
         train_generator,
@@ -766,23 +654,20 @@ if base_model is not None:
         verbose=1
     )
 
-    # Phase 2: Fine-tune the model by unfreezing deeper layers
+    # Phase 2: Fine-tune the model
     print("Phase 2: Fine-tuning the model...")
     
     # Unfreeze the base model but keep early layers frozen
     base_model.trainable = True
     
-    # Progressive unfreezing - different strategy based on architecture
+    # Progressive unfreezing
     if MODEL_ARCHITECTURE == "densenet":
-        # For DenseNet, unfreeze last half of the network
         for layer in base_model.layers[:len(base_model.layers)//2]:
             layer.trainable = False
     elif MODEL_ARCHITECTURE == "resnet":
-        # For ResNet, unfreeze last 50 layers
         for layer in base_model.layers[:-50]:
             layer.trainable = False
     elif MODEL_ARCHITECTURE == "efficientnet":
-        # For EfficientNet, unfreeze last 30 layers
         for layer in base_model.layers[:-30]:
             layer.trainable = False
     
@@ -823,80 +708,8 @@ if base_model is not None:
         'recall': history_phase1.history['recall'] + history_phase2.history['recall'],
         'val_recall': history_phase1.history['val_recall'] + history_phase2.history['val_recall']
     }
-else:
-    # For ensemble models, train in a single phase
-    print("Training ensemble model...")
-    history = model.fit(
-        train_generator,
-        steps_per_epoch=train_generator.batches_per_epoch,
-        validation_data=valid_generator,
-        validation_steps=len(valid_generator),
-        epochs=EPOCHS,
-        callbacks=callbacks,
-        verbose=1
-    )
-    
-    # For consistent plotting
-    history_combined = history.history
 
-# Plot training metrics
-plt.figure(figsize=(16, 12))
-
-# Plot accuracy
-plt.subplot(2, 2, 1)
-plt.plot(history_combined['accuracy'], label='Training Accuracy')
-plt.plot(history_combined['val_accuracy'], label='Validation Accuracy')
-plt.title('Model Accuracy')
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-plt.legend()
-if base_model is not None:
-   plt.axvline(x=len(history_phase1.history['accuracy'])-1, color='r', linestyle='--', label='Fine-tuning start')
-
-# Plot loss
-plt.subplot(2, 2, 2)
-plt.plot(history_combined['loss'], label='Training Loss')
-plt.plot(history_combined['val_loss'], label='Validation Loss')
-plt.title('Model Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.legend()
-if base_model is not None:
-   plt.axvline(x=len(history_phase1.history['loss'])-1, color='r', linestyle='--')
-
-# Plot AUC
-plt.subplot(2, 2, 3)
-plt.plot(history_combined['auc'], label='Training AUC')
-plt.plot(history_combined['val_auc'], label='Validation AUC')
-plt.title('Model AUC')
-plt.xlabel('Epoch')
-plt.ylabel('AUC')
-plt.legend()
-if base_model is not None:
-   plt.axvline(x=len(history_phase1.history['auc'])-1, color='r', linestyle='--')
-
-# Plot Precision-Recall
-plt.subplot(2, 2, 4)
-plt.plot(history_combined['precision'], label='Training Precision')
-plt.plot(history_combined['val_precision'], label='Validation Precision')
-plt.plot(history_combined['recall'], label='Training Recall')
-plt.plot(history_combined['val_recall'], label='Validation Recall')
-plt.title('Precision and Recall')
-plt.xlabel('Epoch')
-plt.ylabel('Score')
-plt.legend()
-if base_model is not None:
-   plt.axvline(x=len(history_phase1.history['precision'])-1, color='r', linestyle='--')
-
-plt.tight_layout()
-plt.savefig(os.path.join(PLOTS_DIR, f'training_history_{MODEL_ARCHITECTURE}.png'))
-plt.show()
-
-# -------------------------------------------------------
-# Enhanced Evaluation on Test Set
-# -------------------------------------------------------
-
-# Final evaluation on test data
+# Evaluate model
 print("\n=== Final Evaluation on Test Set ===")
 test_results = model.evaluate(test_generator, verbose=1)
 print(f"Test Loss: {test_results[0]:.4f}")
@@ -905,23 +718,29 @@ print(f"Test AUC: {test_results[2]:.4f}")
 print(f"Test Precision: {test_results[3]:.4f}")
 print(f"Test Recall: {test_results[4]:.4f}")
 
-# Get predictions
+# Get predictions with test-time augmentation
 test_steps = len(test_generator)
 test_y_true = []
 test_y_pred = []
 
 for i in range(test_steps):
-   x_batch, y_batch = test_generator[i]
-   test_y_true.extend(y_batch)
-   preds = model.predict(x_batch)
-   test_y_pred.extend(preds.flatten())
+    x_batch, y_batch = test_generator[i]
+    test_y_true.extend(y_batch)
+    
+    # Apply test-time augmentation for each image in batch
+    batch_preds = []
+    for j in range(len(x_batch)):
+        # Get predictions with test-time augmentation
+        pred = test_time_augmentation(model, x_batch[j], num_augmentations=3)
+        batch_preds.append(pred)
+    
+    test_y_pred.extend(batch_preds)
 
 # Convert to numpy arrays
 test_y_true = np.array(test_y_true)
 test_y_pred = np.array(test_y_pred)
 
-# Convert probabilities to binary predictions using optimal threshold
-# Find optimal threshold based on ROC curve for better sensitivity/specificity balance
+# Find optimal threshold
 fpr, tpr, thresholds = roc_curve(test_y_true, test_y_pred)
 optimal_idx = np.argmax(tpr - fpr)
 optimal_threshold = thresholds[optimal_idx]
@@ -933,105 +752,40 @@ test_y_pred_binary = (test_y_pred > optimal_threshold).astype(int)
 # Calculate confusion matrix
 cm = confusion_matrix(test_y_true, test_y_pred_binary)
 
-# Display enhanced confusion matrix
-plt.figure(figsize=(10, 8))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False)
-plt.title(f'Confusion Matrix (Threshold: {optimal_threshold:.2f})')
-plt.ylabel('True Label')
-plt.xlabel('Predicted Label')
-plt.xticks([0.5, 1.5], ['Normal', 'Cancer'])
-plt.yticks([0.5, 1.5], ['Normal', 'Cancer'])
-plt.tight_layout()
-plt.savefig(os.path.join(PLOTS_DIR, f'confusion_matrix_{MODEL_ARCHITECTURE}.png'))
-plt.show()
-
-# Calculate and plot ROC curve with confidence interval
-plt.figure(figsize=(10, 8))
-
-# Calculate ROC curve
-fpr, tpr, _ = roc_curve(test_y_true, test_y_pred)
-roc_auc = auc(fpr, tpr)
-
-# Plot ROC curve
-plt.plot(fpr, tpr, lw=2, label=f'ROC curve (AUC = {roc_auc:.3f})')
-
-# Plot confidence interval (using bootstrapping)
-n_bootstraps = 1000
-rng = np.random.RandomState(42)
-bootstrapped_aucs = []
-
-for i in range(n_bootstraps):
-   # Bootstrap by sampling with replacement
-   indices = rng.randint(0, len(test_y_pred), len(test_y_pred))
-   if len(np.unique(test_y_true[indices])) < 2:
-       # Skip if only one class is present
-       continue
-   
-   # Calculate AUC for this bootstrap sample
-   fpr, tpr, _ = roc_curve(test_y_true[indices], test_y_pred[indices])
-   bootstrapped_aucs.append(auc(fpr, tpr))
-
-# Calculate 95% confidence interval
-bootstrapped_aucs = np.array(bootstrapped_aucs)
-auc_95ci = np.percentile(bootstrapped_aucs, [2.5, 97.5])
-
-# Add confidence interval to plot title
-plt.title(f'ROC Curve (AUC = {roc_auc:.3f}, 95% CI: {auc_95ci[0]:.3f}-{auc_95ci[1]:.3f})')
-
-# Plot diagonal line (random classifier)
-plt.plot([0, 1], [0, 1], 'k--', lw=2)
-
-# Formatting
-plt.xlim([0.0, 1.0])
-plt.ylim([0.0, 1.05])
-plt.xlabel('False Positive Rate (1-Specificity)')
-plt.ylabel('True Positive Rate (Sensitivity)')
-plt.legend(loc="lower right")
-plt.grid(True, alpha=0.3)
-plt.savefig(os.path.join(PLOTS_DIR, f'roc_curve_{MODEL_ARCHITECTURE}.png'))
-plt.show()
-
-# Print detailed classification report
+# Print classification report
 print("\nClassification Report (Using Optimal Threshold):")
 print(classification_report(test_y_true, test_y_pred_binary, target_names=['Normal', 'Cancer']))
 
-# -------------------------------------------------------
-# Calculate Clinical Metrics
-# -------------------------------------------------------
-
 # Calculate clinical metrics
 def calculate_clinical_metrics(y_true, y_pred, threshold=0.5):
-   """Calculate clinically relevant metrics for model evaluation"""
-   # Apply threshold
-   y_pred_binary = (y_pred > threshold).astype(int)
-   
-   # Calculate confusion matrix elements
-   tn, fp, fn, tp = confusion_matrix(y_true, y_pred_binary).ravel()
-   
-   # Calculate metrics
-   sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
-   specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
-   ppv = tp / (tp + fp) if (tp + fp) > 0 else 0  # Positive Predictive Value
-   npv = tn / (tn + fn) if (tn + fn) > 0 else 0  # Negative Predictive Value
-   
-   # F1 score
-   f1 = 2 * (ppv * sensitivity) / (ppv + sensitivity) if (ppv + sensitivity) > 0 else 0
-   
-   # Diagnostic odds ratio (measure of test effectiveness)
-   dor = (tp * tn) / (fp * fn) if (fp * fn) > 0 else 0
-   
-   # Number needed to screen (NNS)
-   nns = 1 / (sensitivity * (sum(y_true) / len(y_true))) if (sensitivity * (sum(y_true) / len(y_true))) > 0 else 0
-   
-   return {
-       "Sensitivity (Recall)": sensitivity,
-       "Specificity": specificity,
-       "Precision (PPV)": ppv,
-       "Negative Predictive Value": npv,
-       "F1 Score": f1,
-       "Diagnostic Odds Ratio": dor,
-       "Number Needed to Screen": nns
-   }
+    """Calculate clinically relevant metrics for model evaluation"""
+    # Apply threshold
+    y_pred_binary = (y_pred > threshold).astype(int)
+    
+    # Calculate confusion matrix elements
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred_binary).ravel()
+    
+    # Calculate metrics
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+    ppv = tp / (tp + fp) if (tp + fp) > 0 else 0  # Positive Predictive Value
+    npv = tn / (tn + fn) if (tn + fn) > 0 else 0  # Negative Predictive Value
+    f1 = 2 * (ppv * sensitivity) / (ppv + sensitivity) if (ppv + sensitivity) > 0 else 0
+    # Diagnostic odds ratio
+    dor = (tp * tn) / (fp * fn) if (fp * fn) > 0 else 0
+    
+    # Number needed to screen
+    nns = 1 / (sensitivity * (sum(y_true) / len(y_true))) if (sensitivity * (sum(y_true) / len(y_true))) > 0 else 0
+    
+    return {
+        "Sensitivity (Recall)": sensitivity,
+        "Specificity": specificity,
+        "Precision (PPV)": ppv,
+        "Negative Predictive Value": npv,
+        "F1 Score": f1,
+        "Diagnostic Odds Ratio": dor,
+        "Number Needed to Screen": nns
+    }
 
 # Calculate metrics using optimal threshold
 clinical_metrics = calculate_clinical_metrics(test_y_true, test_y_pred, threshold=optimal_threshold)
@@ -1039,168 +793,73 @@ clinical_metrics = calculate_clinical_metrics(test_y_true, test_y_pred, threshol
 # Print clinical metrics
 print("\nClinical Performance Metrics:")
 for metric, value in clinical_metrics.items():
-   print(f"{metric}: {value:.4f}")
+    print(f"{metric}: {value:.4f}")
 
-# -------------------------------------------------------
-# Enhanced Prediction with Explainability
-# -------------------------------------------------------
+# Enhanced prediction function with test-time augmentation
+def predict_cancer(model, image_path, threshold=None):
+    """
+    Predict cancer with test-time augmentation
+    
+    Args:
+        model: Loaded model
+        image_path: Path to image file
+        threshold: Classification threshold (default: optimal threshold)
+        
+    Returns:
+        Prediction results
+    """
+    if threshold is None:
+        threshold = optimal_threshold
+    
+    # Load and preprocess image
+    img = Image.open(image_path)
+    img = img.resize((IMG_SIZE, IMG_SIZE))
+    img = img.convert('RGB')
+    img_array = np.array(img) / 255.0
+    
+    # Apply test-time augmentation
+    prediction = test_time_augmentation(model, img_array, num_augmentations=5)
+    
+    # Create result dictionary
+    result = {
+        "prediction": "Cancer" if prediction > threshold else "Normal",
+        "confidence": float(prediction if prediction > threshold else 1 - prediction),
+        "cancer_probability": float(prediction),
+        "threshold_used": float(threshold)
+    }
+    
+    return result
 
-def predict_cancer_with_explanation(model, image_path, threshold=0.5):
-   """
-   Predict cancer and provide visual explanation using Grad-CAM
-   
-   Args:
-       model: Loaded TensorFlow/Keras model
-       image_path: Path to the image file
-       threshold: Classification threshold (default: optimal threshold)
-       
-   Returns:
-       dict: Prediction results and Grad-CAM visualization
-   """
-   # Load and preprocess the image
-   img = Image.open(image_path)
-   img = img.resize((IMG_SIZE, IMG_SIZE))
-   img = img.convert('RGB')
-   img_array = np.array(img) / 255.0
-   
-   # Make prediction
-   x = np.expand_dims(img_array, axis=0)
-   prediction = float(model.predict(x)[0][0])
-   predicted_class = int(prediction > threshold)
-   
-   # Class names
-   class_names = ['Normal', 'Cancer']
-   
-   # Create result dictionary
-   result = {
-       "prediction": class_names[predicted_class],
-       "confidence": prediction if predicted_class == 1 else 1 - prediction,
-       "cancer_probability": prediction,
-       "classification_threshold": threshold
-   }
-   
-   # Generate Grad-CAM visualization
-   try:
-       # Get the last convolutional layer
-       if MODEL_ARCHITECTURE == "densenet":
-           last_conv_layer_name = [layer.name for layer in model.layers if 'conv5_block16_concat' in layer.name][0]
-       elif MODEL_ARCHITECTURE == "resnet":
-           last_conv_layer_name = [layer.name for layer in model.layers if 'conv5_block3_out' in layer.name][0]
-       elif MODEL_ARCHITECTURE == "efficientnet":
-           last_conv_layer_name = [layer.name for layer in model.layers if 'top_activation' in layer.name][0]
-       else:
-           # Fallback - find the last conv layer
-           conv_layers = [layer.name for layer in model.layers if 'conv' in layer.name.lower() and len(layer.output_shape) == 4]
-           last_conv_layer_name = conv_layers[-1] if conv_layers else None
-       
-       if last_conv_layer_name:
-           last_conv_layer = model.get_layer(last_conv_layer_name)
-           
-           # Create a model that maps the input image to the activations of the last conv layer
-           grad_model = tf.keras.models.Model(
-               [model.inputs], 
-               [last_conv_layer.output, model.output]
-           )
-           
-           # Compute gradient of the prediction with respect to the output of the last conv layer
-           with tf.GradientTape() as tape:
-               last_conv_layer_output, predictions = grad_model(x)
-               loss = predictions[:, 0]  # For binary classification
-           
-           # Gradient of the output neuron with respect to the output feature map
-           grads = tape.gradient(loss, last_conv_layer_output)
-           
-           # Vector of mean intensity of gradient over feature map
-           pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-           
-           # Weight the channels by the gradient importance
-           last_conv_layer_output = last_conv_layer_output[0]
-           heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
-           heatmap = tf.squeeze(heatmap)
-           
-           # Normalize the heatmap
-           heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
-           heatmap = heatmap.numpy()
-           
-           # Resize heatmap to original image size
-           import cv2
-           heatmap_resized = cv2.resize(heatmap, (img_array.shape[1], img_array.shape[0]))
-           
-           # Create a colored heatmap
-           heatmap_rgb = np.uint8(255 * plt.cm.jet(heatmap_resized)[:, :, :3])
-           
-           # Superimpose the heatmap on original image
-           superimposed_img = np.uint8(0.6 * img_array * 255 + 0.4 * heatmap_rgb)
-           
-           # Create and save the visualization
-           fig, ax = plt.subplots(1, 3, figsize=(15, 5))
-           ax[0].imshow(img_array)
-           ax[0].set_title('Original Image')
-           ax[0].axis('off')
-           
-           ax[1].imshow(heatmap_resized, cmap='jet')
-           ax[1].set_title('Heatmap')
-           ax[1].axis('off')
-           
-           ax[2].imshow(superimposed_img)
-           ax[2].set_title(f'Prediction: {result["prediction"]} ({result["confidence"]:.2%})')
-           ax[2].axis('off')
-           
-           plt.tight_layout()
-           explanation_path = f"explanation_{os.path.basename(image_path).split('.')[0]}.png"
-           plt.savefig(explanation_path)
-           plt.close()
-           
-           # Add explanation path to result
-           result["explanation_path"] = explanation_path
-   except Exception as e:
-       print(f"Error generating Grad-CAM: {e}")
-       result["explanation_error"] = str(e)
-   
-   return result
-
-# -------------------------------------------------------
-# Save models in multiple formats with versioning
-# -------------------------------------------------------
-
-# Create timestamp for version tracking
-import datetime
+# Save model in multiple formats
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-# Save the model in Keras format
+# Save in Keras format
 model_keras_path = os.path.join(MODELS_DIR, f'chest_ct_binary_classifier_{MODEL_ARCHITECTURE}_{timestamp}.keras')
 model.save(model_keras_path)
 print(f"Model saved in Keras format: {model_keras_path}")
 
-# Save the model in TensorFlow SavedModel format
+# Save in TensorFlow SavedModel format
 model_tf_path = os.path.join(MODELS_DIR, f'chest_ct_binary_classifier_{MODEL_ARCHITECTURE}_tf_{timestamp}')
 tf.saved_model.save(model, model_tf_path)
 print(f"Model saved in TensorFlow SavedModel format: {model_tf_path}")
 
-# Save in TFLite format with optimization for edge devices
+# Save in TFLite format
 converter = tf.lite.TFLiteConverter.from_keras_model(model)
-# Enable optimizations
 converter.optimizations = [tf.lite.Optimize.DEFAULT]
-# Quantize model for smaller size and faster inference
 tflite_model = converter.convert()
 tflite_path = os.path.join(MODELS_DIR, f'chest_ct_binary_classifier_{MODEL_ARCHITECTURE}_{timestamp}.tflite')
 with open(tflite_path, 'wb') as f:
-   f.write(tflite_model)
-print(f"Model saved in optimized TFLite format: {tflite_path}")
+    f.write(tflite_model)
+print(f"Model saved in TFLite format: {tflite_path}")
 
-# Save as h5 for compatibility
+# Save in H5 format for compatibility
 model_h5_path = os.path.join(MODELS_DIR, f'chest_ct_binary_classifier_{MODEL_ARCHITECTURE}_{timestamp}.h5')
 model.save(model_h5_path)
-print(f"Model saved in h5 format: {model_h5_path}")
+print(f"Model saved in H5 format: {model_h5_path}")
 
-# -------------------------------------------------------
-# Summary and Model Comparison
-# -------------------------------------------------------
-
-print("\n=== Enhanced Binary Cancer Detection Model Summary ===")
+# Summary
+print("\n=== Chest Cancer Detection Model Summary ===")
 print(f"Architecture: {MODEL_ARCHITECTURE}")
-print(f"Attention Mechanisms: {'Enabled' if USE_ATTENTION else 'Disabled'}")
-print(f"MixUp Augmentation: {'Enabled' if APPLY_MIXUP else 'Disabled'}")
 print(f"Input Image Size: {IMG_SIZE}x{IMG_SIZE}")
 print(f"Training Images: {len(train_df)}")
 print(f"Validation Images: {len(valid_df)}")
@@ -1210,30 +869,18 @@ print(f"Final Test Accuracy: {test_results[1]:.4f}")
 print(f"Final Test AUC: {test_results[2]:.4f}")
 print(f"Optimal Classification Threshold: {optimal_threshold:.4f}")
 
-# Save current metrics as new baseline
+# Save metrics
 current_metrics = {
-   'architecture': MODEL_ARCHITECTURE,
-   'attention': USE_ATTENTION,
-   'mixup': APPLY_MIXUP,
-   'accuracy': float(test_results[1]),
-   'auc': float(test_results[2]),
-   'precision': float(test_results[3]),
-   'recall': float(test_results[4]),
-   'optimal_threshold': float(optimal_threshold),
-   'timestamp': timestamp
+    'architecture': MODEL_ARCHITECTURE,
+    'accuracy': float(test_results[1]),
+    'auc': float(test_results[2]),
+    'precision': float(test_results[3]),
+    'recall': float(test_results[4]),
+    'optimal_threshold': float(optimal_threshold),
+    'timestamp': timestamp
 }
 
+# Save metrics as JSON
 import json
 with open(os.path.join(PLOTS_DIR, f'metrics_{MODEL_ARCHITECTURE}_{timestamp}.json'), 'w') as f:
-   json.dump(current_metrics, f)
-
-print("\nModel saved in multiple formats for deployment.")
-
-print("\nNext steps could include:")
-print("1. Implementing 3D CNN variants for volumetric CT analysis")
-print("2. Adding Vision Transformer modules for better feature extraction")
-print("3. Creating a model ensemble with different architectures and input sizes")
-print("4. Implementing test-time augmentation for more robust predictions")
-print("5. Deploying as a web service with Grad-CAM visualization for explainability")
-print("6. Exploring self-supervised pre-training on unlabeled CT data")
-print("7. Implementing uncertainty estimation techniques")
+    json.dump(current_metrics, f)
