@@ -448,31 +448,66 @@ def create_efficientnet_model(use_attention=True):
     
     return model, base_model
 
-# Create ensemble model
+# Corrected ensemble model creation
 def create_ensemble_model():
     """Create an ensemble of multiple model architectures"""
-    # Input layer
-    input_layer = Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+    # Create base models
+    densenet_base = DenseNet121(
+        weights='imagenet',
+        include_top=False,
+        input_shape=(IMG_SIZE, IMG_SIZE, 3)
+    )
     
-    # Create individual models
-    densenet_model, _ = create_densenet_model(use_attention=True)
-    resnet_model, _ = create_resnet_model(use_attention=True)
-    efficientnet_model, _ = create_efficientnet_model(use_attention=True)
+    resnet_base = ResNet50V2(
+        weights='imagenet',
+        include_top=False,
+        input_shape=(IMG_SIZE, IMG_SIZE, 3)
+    )
     
-    # Get predictions from each model
-    densenet_output = densenet_model(input_layer)
-    resnet_output = resnet_model(input_layer)
-    efficientnet_output = efficientnet_model(input_layer)
+    efficientnet_base = EfficientNetB0(
+        weights='imagenet',
+        include_top=False,
+        input_shape=(IMG_SIZE, IMG_SIZE, 3)
+    )
     
-    # Average predictions
-    ensemble_output = tf.keras.layers.Average()([
-        densenet_output,
-        resnet_output,
-        efficientnet_output
-    ])
+    # Common input
+    input_layer = tf.keras.layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+    
+    # DenseNet branch
+    d = densenet_base(input_layer)
+    d = add_attention_module(d)
+    d = add_spatial_attention(d)
+    d = tf.keras.layers.GlobalAveragePooling2D()(d)
+    d = tf.keras.layers.Dense(256, activation='relu')(d)
+    d = tf.keras.layers.BatchNormalization()(d)
+    d = tf.keras.layers.Dropout(0.5)(d)
+    d_output = tf.keras.layers.Dense(1, activation='sigmoid', name='densenet_output')(d)
+    
+    # ResNet branch
+    r = resnet_base(input_layer)
+    r = add_attention_module(r)
+    r = add_spatial_attention(r)
+    r = tf.keras.layers.GlobalAveragePooling2D()(r)
+    r = tf.keras.layers.Dense(256, activation='relu')(r)
+    r = tf.keras.layers.BatchNormalization()(r)
+    r = tf.keras.layers.Dropout(0.5)(r)
+    r_output = tf.keras.layers.Dense(1, activation='sigmoid', name='resnet_output')(r)
+    
+    # EfficientNet branch
+    e = efficientnet_base(input_layer)
+    e = add_attention_module(e)
+    e = add_spatial_attention(e)
+    e = tf.keras.layers.GlobalAveragePooling2D()(e)
+    e = tf.keras.layers.Dense(256, activation='relu')(e)
+    e = tf.keras.layers.BatchNormalization()(e)
+    e = tf.keras.layers.Dropout(0.5)(e)
+    e_output = tf.keras.layers.Dense(1, activation='sigmoid', name='efficientnet_output')(e)
+    
+    # Average the outputs
+    ensemble_output = tf.keras.layers.Average()([d_output, r_output, e_output])
     
     # Create ensemble model
-    ensemble_model = Model(inputs=input_layer, outputs=ensemble_output)
+    ensemble_model = tf.keras.models.Model(inputs=input_layer, outputs=ensemble_output)
     
     # Compile model
     ensemble_model.compile(
@@ -487,7 +522,6 @@ def create_ensemble_model():
     )
     
     return ensemble_model
-
 # Test-time augmentation
 def test_time_augmentation(model, image, num_augmentations=5):
     """
