@@ -6,14 +6,14 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import tensorflow as tf
-from tensorflow.keras.models import Model, load_model
+from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Input, Dropout, BatchNormalization, Concatenate
 from tensorflow.keras.applications import DenseNet121, ResNet50V2, EfficientNetB0
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l2
-from tensorflow.keras.losses import binary_crossentropy
+from tensorflow.keras.losses import BinaryCrossentropy
 from PIL import Image, ImageEnhance, ImageOps
 from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
 import datetime
@@ -38,25 +38,27 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
 # Custom focal loss implementation
-def sigmoid_focal_crossentropy(y_true, y_pred, alpha=0.25, gamma=2.0):
-    """Implementation of focal loss for improved training on imbalanced data"""
-    # Get binary crossentropy
-    bce = binary_crossentropy(y_true, y_pred)
-    
-    # Convert y_true to float32
-    y_true = tf.cast(y_true, dtype=tf.float32)
-    
-    # Calculate the focal loss factors
-    p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
-    alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
-    modulating_factor = tf.pow((1.0 - p_t), gamma)
-    
-    # Apply the factors and return
-    return alpha_factor * modulating_factor * bce
+def sigmoid_focal_crossentropy(alpha=0.25, gamma=2.0):
+    """Return sigmoid focal loss function"""
+    def loss_fn(y_true, y_pred):
+        # Get binary crossentropy
+        bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
+        
+        # Convert y_true to float32
+        y_true = tf.cast(y_true, dtype=tf.float32)
+        
+        # Calculate the focal loss factors
+        p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
+        alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
+        modulating_factor = tf.pow((1.0 - p_t), gamma)
+        
+        # Apply the factors and return
+        return alpha_factor * modulating_factor * bce
+    return loss_fn
 
 # Enhanced preprocessing functions
 def apply_clahe(img, chance=0.5):
-    """Apply CLAHE with enhanced parameters for better contrast in CT scans"""
+    """Apply CLAHE for better contrast in CT scans"""
     if np.random.random() < chance:
         if not isinstance(img, Image.Image):
             img = Image.fromarray((img * 255).astype(np.uint8))
@@ -65,7 +67,7 @@ def apply_clahe(img, chance=0.5):
     return img
 
 def apply_random_contrast(img, chance=0.5, factor_range=(0.5, 1.8)):
-    """Apply stronger contrast adjustment for CT scans"""
+    """Apply contrast adjustment for CT scans"""
     if np.random.random() < chance:
         if not isinstance(img, Image.Image):
             img = Image.fromarray((img * 255).astype(np.uint8))
@@ -76,7 +78,7 @@ def apply_random_contrast(img, chance=0.5, factor_range=(0.5, 1.8)):
     return img
 
 def apply_random_sharpness(img, chance=0.5, factor_range=(0.5, 2.2)):
-    """Apply stronger sharpness for better tissue boundary detection"""
+    """Apply sharpness for better tissue boundary detection"""
     if np.random.random() < chance:
         if not isinstance(img, Image.Image):
             img = Image.fromarray((img * 255).astype(np.uint8))
@@ -92,7 +94,7 @@ def apply_windowing(img, chance=0.4, window_width_range=(1500, 2500), window_cen
         if not isinstance(img, np.ndarray):
             img = np.array(img)
         
-        # Simulate Hounsfield unit range (normally from -1000 to +1000)
+        # Simulate Hounsfield unit range
         hu_img = (img * 2000) - 1000
         
         # Randomly select window width and center
@@ -119,25 +121,7 @@ def custom_preprocessing(img):
     img = apply_windowing(img, chance=0.3)
     return img
 
-# MixUp augmentation implementation
-def mixup_data(x, y, alpha=0.2):
-    """Perform MixUp augmentation on batch"""
-    batch_size = x.shape[0]
-    indices = np.random.permutation(batch_size)
-    
-    # Sample lambda from beta distribution
-    lam = np.random.beta(alpha, alpha, batch_size)
-    lam = np.maximum(lam, 1 - lam)
-    lam_x = np.reshape(lam, (batch_size, 1, 1, 1))
-    lam_y = np.reshape(lam, (batch_size, 1))
-    
-    # Apply mixup
-    mixed_x = lam_x * x + (1 - lam_x) * x[indices]
-    mixed_y = lam_y * y + (1 - lam_y) * y[indices]
-    
-    return mixed_x, mixed_y
-
-# Enhanced Balanced Generator
+# Simple data generator
 class BalancedGenerator(tf.keras.utils.Sequence):
     def __init__(self, dataframe, batch_size=16, target_size=(256, 256), 
                  shuffle=True, augment=True, apply_mixup=False):
@@ -232,11 +216,7 @@ class BalancedGenerator(tf.keras.utils.Sequence):
         
         # Convert to numpy arrays
         batch_x = np.array(batch_x)
-        batch_y = np.array(batch_y)
-        
-        # Apply MixUp if enabled
-        if self.apply_mixup and len(batch_x) > 1:
-            batch_x, batch_y = mixup_data(batch_x, batch_y, alpha=0.2)
+        batch_y = np.array(batch_y).reshape(-1, 1)  # Reshape to match model output
         
         return batch_x, batch_y
     
@@ -246,8 +226,8 @@ class BalancedGenerator(tf.keras.utils.Sequence):
             np.random.shuffle(self.normal_indices)
             np.random.shuffle(self.cancer_indices)
 
-# Corrected attention module using Keras layers only
-def add_attention_module(x, ratio=8, name=None):
+# Attention modules using Keras layers
+def add_attention_module(x, ratio=8):
     """Add attention module using Keras layers (Squeeze-and-Excitation)"""
     channel = x.shape[-1]
     
@@ -266,8 +246,7 @@ def add_attention_module(x, ratio=8, name=None):
     
     return x
 
-# Corrected spatial attention module using Keras layers only
-def add_spatial_attention(x, kernel_size=7, name=None):
+def add_spatial_attention(x, kernel_size=7):
     """Add spatial attention module using Keras layers"""
     # Max pooling along channel axis using Lambda layer
     max_pool = tf.keras.layers.Lambda(
@@ -289,6 +268,7 @@ def add_spatial_attention(x, kernel_size=7, name=None):
     x = tf.keras.layers.Multiply()([x, attention])
     
     return x
+
 # Create DenseNet model with built-in attention
 def create_densenet_model(use_attention=True):
     """Create a DenseNet121-based model using built-in components"""
@@ -328,10 +308,10 @@ def create_densenet_model(use_attention=True):
     
     model = Model(inputs, outputs)
     
-    # Compile with custom focal loss
+    # Compile with focal loss
     model.compile(
         optimizer=Adam(learning_rate=0.0001),
-        loss=sigmoid_focal_crossentropy,
+        loss=sigmoid_focal_crossentropy(),
         metrics=[
             'accuracy',
             tf.keras.metrics.AUC(name='auc'),
@@ -381,10 +361,10 @@ def create_resnet_model(use_attention=True):
     
     model = Model(inputs, outputs)
     
-    # Compile with custom focal loss
+    # Compile with focal loss
     model.compile(
         optimizer=Adam(learning_rate=0.0001),
-        loss=sigmoid_focal_crossentropy,
+        loss=sigmoid_focal_crossentropy(),
         metrics=[
             'accuracy',
             tf.keras.metrics.AUC(name='auc'),
@@ -434,10 +414,10 @@ def create_efficientnet_model(use_attention=True):
     
     model = Model(inputs, outputs)
     
-    # Compile with custom focal loss
+    # Compile with focal loss
     model.compile(
         optimizer=Adam(learning_rate=0.0001),
-        loss=sigmoid_focal_crossentropy,
+        loss=sigmoid_focal_crossentropy(),
         metrics=[
             'accuracy',
             tf.keras.metrics.AUC(name='auc'),
@@ -448,7 +428,7 @@ def create_efficientnet_model(use_attention=True):
     
     return model, base_model
 
-# Corrected ensemble model creation
+# Create ensemble model
 def create_ensemble_model():
     """Create an ensemble of multiple model architectures"""
     # Create base models
@@ -474,7 +454,8 @@ def create_ensemble_model():
     input_layer = tf.keras.layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
     
     # DenseNet branch
-    d = densenet_base(input_layer)
+    d = tf.keras.layers.GaussianNoise(0.1)(input_layer)
+    d = densenet_base(d)
     d = add_attention_module(d)
     d = add_spatial_attention(d)
     d = tf.keras.layers.GlobalAveragePooling2D()(d)
@@ -484,7 +465,8 @@ def create_ensemble_model():
     d_output = tf.keras.layers.Dense(1, activation='sigmoid', name='densenet_output')(d)
     
     # ResNet branch
-    r = resnet_base(input_layer)
+    r = tf.keras.layers.GaussianNoise(0.1)(input_layer)
+    r = resnet_base(r)
     r = add_attention_module(r)
     r = add_spatial_attention(r)
     r = tf.keras.layers.GlobalAveragePooling2D()(r)
@@ -494,7 +476,8 @@ def create_ensemble_model():
     r_output = tf.keras.layers.Dense(1, activation='sigmoid', name='resnet_output')(r)
     
     # EfficientNet branch
-    e = efficientnet_base(input_layer)
+    e = tf.keras.layers.GaussianNoise(0.1)(input_layer)
+    e = efficientnet_base(e)
     e = add_attention_module(e)
     e = add_spatial_attention(e)
     e = tf.keras.layers.GlobalAveragePooling2D()(e)
@@ -512,7 +495,7 @@ def create_ensemble_model():
     # Compile model
     ensemble_model.compile(
         optimizer=Adam(learning_rate=0.0001),
-        loss=sigmoid_focal_crossentropy,
+        loss=sigmoid_focal_crossentropy(),
         metrics=[
             'accuracy',
             tf.keras.metrics.AUC(name='auc'),
@@ -522,19 +505,10 @@ def create_ensemble_model():
     )
     
     return ensemble_model
+
 # Test-time augmentation
 def test_time_augmentation(model, image, num_augmentations=5):
-    """
-    Apply test-time augmentation for more robust predictions
-    
-    Args:
-        model: Trained model
-        image: Input image (should be preprocessed)
-        num_augmentations: Number of augmentations to perform
-        
-    Returns:
-        Average prediction across augmentations
-    """
+    """Apply test-time augmentation for more robust predictions"""
     # Create augmentation generator
     datagen = ImageDataGenerator(
         rotation_range=20,
@@ -708,7 +682,7 @@ else:
     # Recompile with lower learning rate
     model.compile(
         optimizer=Adam(learning_rate=0.00001),
-        loss=sigmoid_focal_crossentropy,
+        loss=sigmoid_focal_crossentropy(),
         metrics=[
             'accuracy',
             tf.keras.metrics.AUC(name='auc'),
@@ -771,8 +745,8 @@ for i in range(test_steps):
     test_y_pred.extend(batch_preds)
 
 # Convert to numpy arrays
-test_y_true = np.array(test_y_true)
-test_y_pred = np.array(test_y_pred)
+test_y_true = np.array(test_y_true).flatten()
+test_y_pred = np.array(test_y_pred).flatten()
 
 # Find optimal threshold
 fpr, tpr, thresholds = roc_curve(test_y_true, test_y_pred)
@@ -792,34 +766,31 @@ print(classification_report(test_y_true, test_y_pred_binary, target_names=['Norm
 
 # Calculate clinical metrics
 def calculate_clinical_metrics(y_true, y_pred, threshold=0.5):
-    """Calculate clinically relevant metrics for model evaluation"""
-    # Apply threshold
-    y_pred_binary = (y_pred > threshold).astype(int)
-    
-    # Calculate confusion matrix elements
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred_binary).ravel()
-    
-    # Calculate metrics
-    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
-    ppv = tp / (tp + fp) if (tp + fp) > 0 else 0  # Positive Predictive Value
-    npv = tn / (tn + fn) if (tn + fn) > 0 else 0  # Negative Predictive Value
-    f1 = 2 * (ppv * sensitivity) / (ppv + sensitivity) if (ppv + sensitivity) > 0 else 0
-    # Diagnostic odds ratio
-    dor = (tp * tn) / (fp * fn) if (fp * fn) > 0 else 0
-    
-    # Number needed to screen
-    nns = 1 / (sensitivity * (sum(y_true) / len(y_true))) if (sensitivity * (sum(y_true) / len(y_true))) > 0 else 0
-    
-    return {
-        "Sensitivity (Recall)": sensitivity,
-        "Specificity": specificity,
-        "Precision (PPV)": ppv,
-        "Negative Predictive Value": npv,
-        "F1 Score": f1,
-        "Diagnostic Odds Ratio": dor,
-        "Number Needed to Screen": nns
-    }
+   """Calculate clinically relevant metrics for model evaluation"""
+   # Apply threshold
+   y_pred_binary = (y_pred > threshold).astype(int)
+   
+   # Calculate confusion matrix elements
+   tn, fp, fn, tp = confusion_matrix(y_true, y_pred_binary).ravel()
+   
+   # Calculate metrics
+   sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+   specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+   ppv = tp / (tp + fp) if (tp + fp) > 0 else 0  # Positive Predictive Value
+   npv = tn / (tn + fn) if (tn + fn) > 0 else 0  # Negative Predictive Value
+   f1 = 2 * (ppv * sensitivity) / (ppv + sensitivity) if (ppv + sensitivity) > 0 else 0
+   dor = (tp * tn) / (fp * fn) if (fp * fn) > 0 else 0
+   nns = 1 / (sensitivity * (sum(y_true) / len(y_true))) if (sensitivity * (sum(y_true) / len(y_true))) > 0 else 0
+   
+   return {
+       "Sensitivity (Recall)": sensitivity,
+       "Specificity": specificity,
+       "Precision (PPV)": ppv,
+       "Negative Predictive Value": npv,
+       "F1 Score": f1,
+       "Diagnostic Odds Ratio": dor,
+       "Number Needed to Screen": nns
+   }
 
 # Calculate metrics using optimal threshold
 clinical_metrics = calculate_clinical_metrics(test_y_true, test_y_pred, threshold=optimal_threshold)
@@ -827,42 +798,42 @@ clinical_metrics = calculate_clinical_metrics(test_y_true, test_y_pred, threshol
 # Print clinical metrics
 print("\nClinical Performance Metrics:")
 for metric, value in clinical_metrics.items():
-    print(f"{metric}: {value:.4f}")
+   print(f"{metric}: {value:.4f}")
 
 # Enhanced prediction function with test-time augmentation
 def predict_cancer(model, image_path, threshold=None):
-    """
-    Predict cancer with test-time augmentation
-    
-    Args:
-        model: Loaded model
-        image_path: Path to image file
-        threshold: Classification threshold (default: optimal threshold)
-        
-    Returns:
-        Prediction results
-    """
-    if threshold is None:
-        threshold = optimal_threshold
-    
-    # Load and preprocess image
-    img = Image.open(image_path)
-    img = img.resize((IMG_SIZE, IMG_SIZE))
-    img = img.convert('RGB')
-    img_array = np.array(img) / 255.0
-    
-    # Apply test-time augmentation
-    prediction = test_time_augmentation(model, img_array, num_augmentations=5)
-    
-    # Create result dictionary
-    result = {
-        "prediction": "Cancer" if prediction > threshold else "Normal",
-        "confidence": float(prediction if prediction > threshold else 1 - prediction),
-        "cancer_probability": float(prediction),
-        "threshold_used": float(threshold)
-    }
-    
-    return result
+   """
+   Predict cancer with test-time augmentation
+   
+   Args:
+       model: Loaded model
+       image_path: Path to image file
+       threshold: Classification threshold (default: optimal threshold)
+       
+   Returns:
+       Prediction results
+   """
+   if threshold is None:
+       threshold = optimal_threshold
+   
+   # Load and preprocess image
+   img = Image.open(image_path)
+   img = img.resize((IMG_SIZE, IMG_SIZE))
+   img = img.convert('RGB')
+   img_array = np.array(img) / 255.0
+   
+   # Apply test-time augmentation
+   prediction = test_time_augmentation(model, img_array, num_augmentations=5)
+   
+   # Create result dictionary
+   result = {
+       "prediction": "Cancer" if prediction > threshold else "Normal",
+       "confidence": float(prediction if prediction > threshold else 1 - prediction),
+       "cancer_probability": float(prediction),
+       "threshold_used": float(threshold)
+   }
+   
+   return result
 
 # Save model in multiple formats
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -883,7 +854,7 @@ converter.optimizations = [tf.lite.Optimize.DEFAULT]
 tflite_model = converter.convert()
 tflite_path = os.path.join(MODELS_DIR, f'chest_ct_binary_classifier_{MODEL_ARCHITECTURE}_{timestamp}.tflite')
 with open(tflite_path, 'wb') as f:
-    f.write(tflite_model)
+   f.write(tflite_model)
 print(f"Model saved in TFLite format: {tflite_path}")
 
 # Save in H5 format for compatibility
@@ -905,16 +876,16 @@ print(f"Optimal Classification Threshold: {optimal_threshold:.4f}")
 
 # Save metrics
 current_metrics = {
-    'architecture': MODEL_ARCHITECTURE,
-    'accuracy': float(test_results[1]),
-    'auc': float(test_results[2]),
-    'precision': float(test_results[3]),
-    'recall': float(test_results[4]),
-    'optimal_threshold': float(optimal_threshold),
-    'timestamp': timestamp
+   'architecture': MODEL_ARCHITECTURE,
+   'accuracy': float(test_results[1]),
+   'auc': float(test_results[2]),
+   'precision': float(test_results[3]),
+   'recall': float(test_results[4]),
+   'optimal_threshold': float(optimal_threshold),
+   'timestamp': timestamp
 }
 
 # Save metrics as JSON
 import json
 with open(os.path.join(PLOTS_DIR, f'metrics_{MODEL_ARCHITECTURE}_{timestamp}.json'), 'w') as f:
-    json.dump(current_metrics, f)
+   json.dump(current_metrics, f)
