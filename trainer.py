@@ -285,55 +285,129 @@ class EnhancedBalancedGenerator(tf.keras.utils.Sequence):
             np.random.shuffle(self.cancer_indices)
 
 # -------------------------------------------------------
-# Attention Mechanisms
+# Attention Mechanisms with Custom Layers
 # -------------------------------------------------------
+
+class ChannelAttention(tf.keras.layers.Layer):
+    """Custom Channel Attention layer implementation"""
+    def __init__(self, ratio=8, **kwargs):
+        super(ChannelAttention, self).__init__(**kwargs)
+        self.ratio = ratio
+        
+    def build(self, input_shape):
+        channel = input_shape[-1]
+        self.gap = GlobalAveragePooling2D()
+        self.dense1 = Dense(channel // self.ratio, activation='relu', 
+                         kernel_initializer='he_normal', use_bias=False)
+        self.dense2 = Dense(channel, activation='sigmoid', 
+                         kernel_initializer='he_normal', use_bias=False)
+        self.reshape = tf.keras.layers.Reshape((1, 1, channel))
+        self.multiply = Multiply()
+        
+        super(ChannelAttention, self).build(input_shape)
+        
+    def call(self, inputs):
+        gap = self.gap(inputs)
+        dense1 = self.dense1(gap)
+        dense2 = self.dense2(dense1)
+        reshape = self.reshape(dense2)
+        
+        return self.multiply([inputs, reshape])
+    
+    def compute_output_shape(self, input_shape):
+        return input_shape
+    
+    def get_config(self):
+        config = super(ChannelAttention, self).get_config()
+        config.update({
+            'ratio': self.ratio
+        })
+        return config
+
+class ChannelMaxPooling(tf.keras.layers.Layer):
+    """Custom layer for max pooling across channels"""
+    def __init__(self, **kwargs):
+        super(ChannelMaxPooling, self).__init__(**kwargs)
+    
+    def call(self, inputs):
+        return tf.reduce_max(inputs, axis=3, keepdims=True)
+    
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[1], input_shape[2], 1)
+    
+    def get_config(self):
+        config = super(ChannelMaxPooling, self).get_config()
+        return config
+
+class ChannelAvgPooling(tf.keras.layers.Layer):
+    """Custom layer for average pooling across channels"""
+    def __init__(self, **kwargs):
+        super(ChannelAvgPooling, self).__init__(**kwargs)
+    
+    def call(self, inputs):
+        return tf.reduce_mean(inputs, axis=3, keepdims=True)
+    
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[1], input_shape[2], 1)
+    
+    def get_config(self):
+        config = super(ChannelAvgPooling, self).get_config()
+        return config
+
+class SpatialAttention(tf.keras.layers.Layer):
+    """Custom Spatial Attention layer implementation"""
+    def __init__(self, kernel_size=7, **kwargs):
+        super(SpatialAttention, self).__init__(**kwargs)
+        self.kernel_size = kernel_size
+        
+    def build(self, input_shape):
+        self.channel_max_pool = ChannelMaxPooling()
+        self.channel_avg_pool = ChannelAvgPooling()
+        self.concat = tf.keras.layers.Concatenate(axis=3)
+        self.conv = Conv2D(1, kernel_size=self.kernel_size, padding='same', activation='sigmoid')
+        self.multiply = Multiply()
+        super(SpatialAttention, self).build(input_shape)
+        
+    def call(self, inputs):
+        # Max pool along channel dimension
+        max_pool = self.channel_max_pool(inputs)
+        # Average pool along channel dimension
+        avg_pool = self.channel_avg_pool(inputs)
+        # Concatenate
+        concat = self.concat([max_pool, avg_pool])
+        # Apply convolution
+        attention_map = self.conv(concat)
+        # Apply attention
+        return self.multiply([inputs, attention_map])
+    
+    def compute_output_shape(self, input_shape):
+        return input_shape
+    
+    def get_config(self):
+        config = super(SpatialAttention, self).get_config()
+        config.update({
+            'kernel_size': self.kernel_size
+        })
+        return config
 
 def create_attention_module(x, ratio=8):
     """
-    Create a channel attention module (Squeeze-and-Excitation block)
+    Create a channel attention module using custom layer
     
     Why: Attention mechanisms help the model focus on relevant areas of the image
     and ignore irrelevant parts, which is particularly important for detecting
     subtle cancer features in CT scans.
     """
-    channel = tf.keras.backend.int_shape(x)[-1]
-    
-    # Squeeze operation
-    se = GlobalAveragePooling2D()(x)
-    
-    # Excitation operation
-    se = Dense(channel // ratio, activation='relu', kernel_initializer='he_normal', use_bias=False)(se)
-    se = Dense(channel, activation='sigmoid', kernel_initializer='he_normal', use_bias=False)(se)
-    
-    # Scale the input - using Keras Reshape layer instead of tf.reshape
-    se = tf.keras.layers.Reshape((1, 1, channel))(se)
-    x = Multiply()([x, se])
-    
-    return x
+    return ChannelAttention(ratio=ratio)(x)
 
 def create_spatial_attention_module(x):
-def create_spatial_attention_module(x):
-    """Create a spatial attention module using dedicated layers instead of Lambda"""
-    # Max pooling across channels
-    max_pool = tf.keras.layers.MaxPool2D(pool_size=(1, 1), data_format='channels_last')(x)
+    """
+    Create a spatial attention module using custom layer
     
-    # Average pooling across channels using a custom layer
-    class ChannelAveragePooling(tf.keras.layers.Layer):
-        def call(self, inputs):
-            return tf.reduce_mean(inputs, axis=3, keepdims=True)
-            
-    avg_pool = ChannelAveragePooling()(x)
-    
-    # Concatenate pool features
-    concat = tf.keras.layers.Concatenate(axis=3)([max_pool, avg_pool])
-    
-    # Conv to generate attention map
-    attention = Conv2D(1, kernel_size=7, padding='same', activation='sigmoid')(concat)
-    
-    # Apply attention
-    x = Multiply()([x, attention])
-    
-    return x
+    Why: Spatial attention helps the model focus on specific regions
+    in the image that are most likely to contain cancer indicators.
+    """
+    return SpatialAttention(kernel_size=7)(x)
 
 # -------------------------------------------------------
 # Enhanced Model Architectures

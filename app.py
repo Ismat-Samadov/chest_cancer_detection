@@ -25,6 +25,7 @@ model = None
 
 # Custom layer classes for loading the model
 class ChannelAttention(tf.keras.layers.Layer):
+    """Custom Channel Attention layer implementation"""
     def __init__(self, ratio=8, **kwargs):
         super(ChannelAttention, self).__init__(**kwargs)
         self.ratio = ratio
@@ -59,23 +60,57 @@ class ChannelAttention(tf.keras.layers.Layer):
         })
         return config
 
+class ChannelMaxPooling(tf.keras.layers.Layer):
+    """Custom layer for max pooling across channels"""
+    def __init__(self, **kwargs):
+        super(ChannelMaxPooling, self).__init__(**kwargs)
+    
+    def call(self, inputs):
+        return tf.reduce_max(inputs, axis=3, keepdims=True)
+    
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[1], input_shape[2], 1)
+    
+    def get_config(self):
+        config = super(ChannelMaxPooling, self).get_config()
+        return config
+
+class ChannelAvgPooling(tf.keras.layers.Layer):
+    """Custom layer for average pooling across channels"""
+    def __init__(self, **kwargs):
+        super(ChannelAvgPooling, self).__init__(**kwargs)
+    
+    def call(self, inputs):
+        return tf.reduce_mean(inputs, axis=3, keepdims=True)
+    
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[1], input_shape[2], 1)
+    
+    def get_config(self):
+        config = super(ChannelAvgPooling, self).get_config()
+        return config
+
 class SpatialAttention(tf.keras.layers.Layer):
+    """Custom Spatial Attention layer implementation"""
     def __init__(self, kernel_size=7, **kwargs):
         super(SpatialAttention, self).__init__(**kwargs)
         self.kernel_size = kernel_size
         
     def build(self, input_shape):
+        self.channel_max_pool = ChannelMaxPooling()
+        self.channel_avg_pool = ChannelAvgPooling()
+        self.concat = tf.keras.layers.Concatenate(axis=3)
         self.conv = tf.keras.layers.Conv2D(1, kernel_size=self.kernel_size, padding='same', activation='sigmoid')
         self.multiply = tf.keras.layers.Multiply()
         super(SpatialAttention, self).build(input_shape)
         
     def call(self, inputs):
         # Max pool along channel dimension
-        max_pool = tf.reduce_max(inputs, axis=3, keepdims=True)
+        max_pool = self.channel_max_pool(inputs)
         # Average pool along channel dimension
-        avg_pool = tf.reduce_mean(inputs, axis=3, keepdims=True)
+        avg_pool = self.channel_avg_pool(inputs)
         # Concatenate
-        concat = tf.concat([max_pool, avg_pool], axis=3)
+        concat = self.concat([max_pool, avg_pool])
         # Apply convolution
         attention_map = self.conv(concat)
         # Apply attention
@@ -142,6 +177,8 @@ async def lifespan(app: FastAPI):
         custom_objects = {
             'ChannelAttention': ChannelAttention,
             'SpatialAttention': SpatialAttention,
+            'ChannelMaxPooling': ChannelMaxPooling,
+            'ChannelAvgPooling': ChannelAvgPooling,
             'sigmoid_focal_crossentropy': sigmoid_focal_crossentropy
         }
         
