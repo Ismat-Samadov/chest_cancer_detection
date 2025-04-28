@@ -1,19 +1,19 @@
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copy requirements and install dependencies
-COPY requirements.txt .
+# Copy requirements first for better caching
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy the rest of the application
 COPY . .
 
-# Create necessary directories
-RUN mkdir -p models plots
+# Create a models directory if it doesn't exist
+RUN mkdir -p models
 
-# Set up FastAPI application
-EXPOSE 8080
+# Make the setup script executable
+RUN chmod +x setup.sh
 
-# Command to run the application
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+# Run the setup script and start the Streamlit app
+CMD ["sh", "-c", "./setup.sh && streamlit run app.py"]
