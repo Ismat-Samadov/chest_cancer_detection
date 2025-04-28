@@ -13,13 +13,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code and models
 COPY . .
 
-# Create a directory for model storage
+# Create directories if they don't exist
+RUN mkdir -p static
 RUN mkdir -p models
 
-# Expose the port the app runs on
+# Expose the port
 EXPOSE 8000
 
 # Command to run the application

@@ -9,7 +9,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const cancerProbabilityText = document.getElementById('cancer-probability-text');
     const confidenceBar = document.getElementById('confidence-bar');
     const confidenceText = document.getElementById('confidence-text');
+    const modelInfoDiv = document.getElementById('model-info');
 
+    // Fetch model info on page load
+    fetchModelInfo();
+
+    // Event listener for form submission
     form.addEventListener('submit', async function(e) {
         e.preventDefault();
         
@@ -54,6 +59,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
+    // Function to display prediction results
     function displayResults(result, file) {
         // Set image
         uploadedImage.src = URL.createObjectURL(file);
@@ -85,5 +91,23 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Show result container
         resultContainer.classList.remove('d-none');
+    }
+    
+    // Function to fetch model info
+    async function fetchModelInfo() {
+        try {
+            const response = await fetch('/model-info');
+            if (response.ok) {
+                const data = await response.json();
+                if (data.model_loaded) {
+                    modelInfoDiv.textContent = `Model type: ${data.model_type} | Threshold: ${data.threshold.toFixed(4)}`;
+                } else {
+                    modelInfoDiv.textContent = 'No model loaded';
+                    modelInfoDiv.style.color = '#dc3545';
+                }
+            }
+        } catch (error) {
+            console.error('Error fetching model info:', error);
+        }
     }
 });
