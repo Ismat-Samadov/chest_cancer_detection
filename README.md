@@ -1,5 +1,3 @@
-Based on the provided information, I can help you update your README with more detailed content about your chest cancer detection project.
-
 # Chest Cancer Detection
 
 A deep learning project for detecting cancer in chest CT scan images using a binary classification approach based on DenseNet121 architecture with attention mechanisms.
