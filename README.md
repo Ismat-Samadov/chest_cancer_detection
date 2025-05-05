@@ -6,6 +6,107 @@ A deep learning project for detecting cancer in chest CT scan images using a bin
 
 This project implements a convolutional neural network to classify chest CT scan images as either "Normal" or "Cancer". It uses transfer learning with DenseNet121 as the base model and includes custom preprocessing techniques specific to medical imaging, along with attention mechanisms to improve focus on relevant image regions.
 
+## System Architecture
+
+```mermaid
+flowchart TD
+    A[Input CT Scan Image] --> B[Preprocessing]
+    B --> |CT-Specific Techniques| C[Augmentation]
+    C --> D[Deep Learning Model]
+    D --> |Feature Extraction| E[Base Model: DenseNet/ResNet/EfficientNet]
+    E --> F[Attention Mechanism]
+    F --> G[Classification Head]
+    G --> H[Binary Output: Normal/Cancer]
+    
+    subgraph Preprocessing
+    I[CLAHE] --> J[Contrast Adjustment]
+    J --> K[Sharpness Enhancement]
+    K --> L[CT Windowing]
+    end
+    
+    subgraph Attention
+    M[Channel Attention] --> N[Spatial Attention]
+    end
+```
+
+## Data Processing Pipeline
+
+```mermaid
+flowchart LR
+    A[Raw CT Scan Images] --> B[Split: Train/Valid/Test]
+    B --> C[Class Balancing]
+    C --> D[Custom Data Generator]
+    D --> E[Image Preprocessing]
+    E --> F[Data Augmentation]
+    F --> G[MixUp Augmentation]
+    G --> H[Model Training]
+```
+
+## Training Workflow
+
+```mermaid
+flowchart TD
+    A[Initialize Model] --> B[Phase 1: Frozen Base Model]
+    B --> C[Train Top Layers]
+    C --> D[Phase 2: Fine-tuning]
+    D --> E[Unfreeze Deeper Layers]
+    E --> F[Continue Training]
+    F --> G[Evaluate on Test Set]
+    G --> H[Save Model in Multiple Formats]
+    
+    subgraph Evaluation
+    I[Accuracy] --> J[AUC]
+    J --> K[Precision/Recall]
+    K --> L[Confusion Matrix]
+    L --> M[ROC Curve]
+    end
+```
+
+## Model Architecture
+
+```mermaid
+flowchart TD
+    A[Input: 256x256x3] --> B[Base Model]
+    B --> C[Global Average Pooling]
+    C --> D[Attention Modules]
+    D --> E[Dense Layer: 512 units]
+    E --> F[Batch Normalization]
+    F --> G[Dropout: 0.5]
+    G --> H[Dense Layer: 256 units]
+    H --> I[Batch Normalization]
+    I --> J[Dropout: 0.5]
+    J --> K[Output: Sigmoid]
+    
+    subgraph Attention Mechanism
+    L[Channel Attention] --> M[Spatial Attention]
+    end
+```
+
+## Attention Mechanism Details
+
+```mermaid
+flowchart LR
+    subgraph "Channel Attention"
+    A[Feature Map] --> B[Global Average Pooling]
+    B --> C[Dense: Channel/Ratio]
+    C --> D[ReLU]
+    D --> E[Dense: Channel]
+    E --> F[Sigmoid]
+    F --> G[Reshape]
+    G --> H[Multiply with Original]
+    end
+    
+    subgraph "Spatial Attention"
+    I[Feature Map] --> J[Max Pool Across Channels]
+    I --> K[Avg Pool Across Channels]
+    J --> L[Concatenate]
+    K --> L
+    L --> M[Conv2D: 7x7]
+    M --> N[Sigmoid]
+    N --> O[Multiply with Original]
+    end
+```
+
 ## Dataset
 
 The project uses the Chest CT-Scan Images dataset available on Kaggle: [Chest CT-Scan Images Dataset](https://www.kaggle.com/datasets/mohamedhanyyy/chest-ctscan-images/data)
@@ -16,6 +117,54 @@ The dataset contains chest CT scan images organized in the following structure:
 - Test set: Contains 315 images (54 normal scans and 261 cancer scans)
 
 Cancer scans include different types of lung cancer such as squamous cell carcinoma, adenocarcinoma, and large cell carcinoma.
+
+```mermaid
+pie
+    title Dataset Distribution
+    "Training Normal": 148
+    "Training Cancer": 465
+    "Validation Normal": 13
+    "Validation Cancer": 59
+    "Test Normal": 54
+    "Test Cancer": 261
+```
+
+## CT-Specific Preprocessing
+
+```mermaid
+flowchart LR
+    A[Original CT Image] --> B[CLAHE]
+    B --> C[Random Contrast]
+    C --> D[Random Sharpness]
+    D --> E[CT Windowing]
+    E --> F[Processed Image]
+    
+    subgraph "CT Windowing"
+    G[Scale to Hounsfield Units] --> H[Select Window Width/Center]
+    H --> I[Apply Window]
+    I --> J[Rescale to 0-1]
+    end
+```
+
+## Two-Phase Training Strategy
+
+```mermaid
+flowchart TD
+    A[Base Model: Pre-trained on ImageNet] --> B[Phase 1: Frozen Base]
+    B --> C[Train Only New Layers]
+    C --> D[Early Stopping on AUC]
+    D --> E[Phase 2: Fine-tuning]
+    E --> F[Unfreeze Some Base Layers]
+    F --> G[Lower Learning Rate]
+    G --> H[Continue Training]
+    H --> I[Save Best Model]
+
+    subgraph "Progressive Unfreezing"
+    J[DenseNet: Unfreeze Last Half] 
+    K[ResNet: Unfreeze Last 50 Layers]
+    L[EfficientNet: Unfreeze Last 30 Layers]
+    end
+```
 
 ## Kaggle Notebook
 
@@ -30,10 +179,53 @@ You can:
 - Fork it to run your own experiments
 - Download it to run locally
 
-## Demo Application
+## Demo Application Architecture
 
-A web interface for the model is deployed on Hugging Face Spaces:
-- **Demo**: [Chest Cancer Detection on Hugging Face](https://huggingface.co/spaces/IsmatS/chest_cancer_detection)
+```mermaid
+flowchart LR
+    A[User Interface] --> B[Upload CT Scan]
+    B --> C[FastAPI Backend]
+    C --> D[Image Preprocessing]
+    D --> E[Model Prediction]
+    E --> F[Results Displayed to User]
+    
+    subgraph "Model Loading"
+    G[Try Keras Model] --> |Fallback| H[Try H5 Model]
+    H --> |Fallback| I[Try TF SavedModel]
+    I --> |Fallback| J[Try TFLite Model]
+    end
+```
+
+## Performance Metrics
+
+The model achieves the following performance on the test set:
+
+- **AUC Score**: 0.847 (95% CI: 0.785-0.903)
+- **Sensitivity (Recall)**: 0.980
+- **Specificity**: 0.185
+- **Precision (PPV)**: 0.848
+- **F1 Score**: 0.909
+- **Optimal Threshold**: 0.471
+- **Diagnostic Odds Ratio**: 11.136
+
+```mermaid
+xychart-beta
+    title "ROC Curve"
+    x-axis "False Positive Rate (1-Specificity)" 0 --> 1
+    y-axis "True Positive Rate (Sensitivity)" 0 --> 1
+    line [
+        [0, 0],
+        [0.2, 0.65],
+        [0.4, 0.85],
+        [0.6, 0.92],
+        [0.8, 0.97],
+        [1, 1]
+    ]
+    line [
+        [0, 0],
+        [1, 1]
+    ]
+```
 
 ## Features
 
@@ -77,18 +269,6 @@ A web interface for the model is deployed on Hugging Face Spaces:
 - **Early Stopping**: Implements early stopping to prevent overfitting during training
 - **Custom Loss Function**: Implementation of Focal Loss for handling class imbalance
 - **Optimal Threshold**: Automatically determines optimal classification threshold from ROC curve
-
-## Performance Metrics
-
-The model achieves the following performance on the test set:
-
-- **AUC Score**: 0.847 (95% CI: 0.785-0.903)
-- **Sensitivity (Recall)**: 0.980
-- **Specificity**: 0.185
-- **Precision (PPV)**: 0.848
-- **F1 Score**: 0.909
-- **Optimal Threshold**: 0.471
-- **Diagnostic Odds Ratio**: 11.136
 
 ## Requirements
 
