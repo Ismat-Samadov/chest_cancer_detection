@@ -209,22 +209,28 @@ The model achieves the following performance on the test set:
 - **Diagnostic Odds Ratio**: 11.136
 
 ```mermaid
-xychart-beta
-    title "ROC Curve"
-    x-axis "False Positive Rate (1-Specificity)" 0 --> 1
-    y-axis "True Positive Rate (Sensitivity)" 0 --> 1
-    line [
-        [0, 0],
-        [0.2, 0.65],
-        [0.4, 0.85],
-        [0.6, 0.92],
-        [0.8, 0.97],
-        [1, 1]
-    ]
-    line [
-        [0, 0],
-        [1, 1]
-    ]
+graph LR
+    subgraph "ROC Curve (AUC = 0.847)"
+        A((0,0)) --> B((0.2,0.65))
+        B --> C((0.4,0.85))
+        C --> D((0.6,0.92))
+        D --> E((0.8,0.97))
+        E --> F((1,1))
+        
+        %% Diagonal reference line
+        A -.-> |"Random Classifier"| F
+        
+        %% Optimal threshold point
+        C --- G[("Optimal Threshold (0.471)")]
+    end
+    
+    style A fill:#f9f9f9,stroke:#333,stroke-width:2px
+    style B fill:#d1e7dd,stroke:#333,stroke-width:2px
+    style C fill:#a3cfbb,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5
+    style D fill:#75b798,stroke:#333,stroke-width:2px
+    style E fill:#479f76,stroke:#333,stroke-width:2px
+    style F fill:#198754,stroke:#333,stroke-width:2px
+    style G fill:#dc3545,stroke:#333,stroke-width:2px
 ```
 
 ## Features
